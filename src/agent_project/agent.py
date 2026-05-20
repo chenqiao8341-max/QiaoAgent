@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from langchain_core.messages import HumanMessage
 from langgraph.prebuilt import create_react_agent
 
@@ -11,6 +13,28 @@ from agent_project.tools import get_tools
 DEFAULT_SYSTEM_PROMPT = """You are a practical AI agent.
 Use tools when they help answer accurately.
 Keep answers concise, but explain important assumptions."""
+
+
+def message_content_to_text(content: Any) -> str:
+    """Convert LangChain message content or content blocks into displayable text."""
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and "text" in item:
+                parts.append(str(item["text"]))
+            elif hasattr(item, "text"):
+                parts.append(str(item.text))
+        return "\n".join(part for part in parts if part)
+
+    if isinstance(content, dict) and "text" in content:
+        return str(content["text"])
+
+    return str(content)
 
 
 def build_agent(settings: Settings | None = None, system_prompt: str = DEFAULT_SYSTEM_PROMPT):
@@ -25,9 +49,5 @@ def build_agent(settings: Settings | None = None, system_prompt: str = DEFAULT_S
 
 def invoke_agent(user_input: str, settings: Settings | None = None) -> str:
     agent = build_agent(settings)
-    result = agent.invoke(
-        {
-            "messages": [HumanMessage(content=user_input)]
-        }
-    )
-    return result["messages"][-1].content
+    result = agent.invoke({"messages": [HumanMessage(content=user_input)]})
+    return message_content_to_text(result["messages"][-1].content)

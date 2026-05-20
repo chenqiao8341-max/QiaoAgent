@@ -1,11 +1,37 @@
 from __future__ import annotations
 
 import argparse
+from typing import Any
 
 from langchain_core.messages import HumanMessage
 
-from agent_project.agent import build_agent, invoke_agent
+from agent_project.agent import build_agent, invoke_agent, message_content_to_text
 from agent_project.config import load_settings
+
+
+def _stream_agent_response(agent: Any, messages: list) -> list:
+    """Stream the latest agent response and return the updated message history."""
+    print("\nAgent: ", end="", flush=True)
+
+    latest_messages = messages
+    for stream_mode, chunk in agent.stream(
+        {"messages": messages},
+        stream_mode=["messages", "values"],
+    ):
+        if stream_mode == "messages":
+            message_chunk, _metadata = chunk
+            if getattr(message_chunk, "type", None) != "AIMessageChunk":
+                continue
+
+            text = message_content_to_text(message_chunk.content)
+            if text:
+                print(text, end="", flush=True)
+
+        elif stream_mode == "values":
+            latest_messages = chunk["messages"]
+
+    print()
+    return latest_messages
 
 
 def run_chat() -> None:
@@ -28,9 +54,7 @@ def run_chat() -> None:
             continue
 
         messages.append(HumanMessage(content=user_text))
-        result = agent.invoke({"messages": messages})
-        messages = result["messages"]
-        print(f"\nAgent: {messages[-1].content}")
+        messages = _stream_agent_response(agent, messages)
 
 
 def main() -> None:
