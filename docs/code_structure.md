@@ -66,7 +66,7 @@ Python 项目的包配置文件。它定义了：
 
 定义 agent 可以调用的工具。
 
-当前有六个工具：
+当前工具包括：
 
 - `calculator`：计算简单数值表达式。
 - `current_time`：返回本地当前时间。
@@ -74,10 +74,15 @@ Python 项目的包配置文件。它定义了：
 - `list_local_directory`：列出本地目录。
 - `read_local_file`：读取本地文本文件。
 - `write_local_file`：经过人类确认后写入本地文本文件。
+- `execute_shell_command`：经过人类确认后执行 shell 命令。
+- `web_search`：联网搜索并返回标题和 URL。
+- `open_web_page`：打开网页并返回可读正文。
+- `list_web_page_links`：列出网页链接。
+- `create_task_queue` / `update_task_step` / `get_task_queue` / `list_task_queues`：维护进程内多步骤任务队列。
 
 LangChain 通过 `@tool` 装饰器把普通 Python 函数包装成可被模型 tool call 的工具。`get_tools()` 返回工具列表，`agent.py` 会读取它。文件工具是在 `filesystem.py` 中定义，再由 `basic.py` 统一注册。
 
-如果你要新增工具，通常在这里添加函数，然后加入 `get_tools()`。
+如果你要新增工具，通常新建独立 tool 模块，然后在这里导入并加入 `get_tools()`。
 
 ### `src/agent_project/tools/filesystem.py`
 
@@ -99,6 +104,30 @@ AGENT_ENABLE_HUMAN_APPROVAL=true
 策略是：工作目录内读取直接允许；工作目录外读取需要人类确认；任何写入都需要人类确认。确认流程由 `_ask_human_approval()` 完成，它会在终端打印操作、路径、原因，并要求输入完整的 `yes`。
 
 这个模块相当于给 agent 加了一层“本机文件能力 + 人类审批闸门”。它不是操作系统级权限系统，而是 agent 工具层面的许可流程。
+
+### `src/agent_project/tools/shell.py`
+
+shell 命令执行工具。当前暴露 `execute_shell_command(command, cwd=".", timeout_seconds=30, max_chars=20000)`。
+
+它会检查 `AGENT_ENABLE_SHELL_COMMANDS`，确认工作目录存在，然后通过终端人工审批再调用 `subprocess.run()`。输出包含 exit code、stdout 和 stderr，并受超时和最大字符数限制。
+
+### `src/agent_project/tools/web.py`
+
+自动联网搜索工具。当前暴露 `web_search(query, max_results=5, timeout_seconds=10)`。
+
+它通过标准库请求 DuckDuckGo HTML 搜索页，解析结果链接，清理 DuckDuckGo 跳转 URL 后返回标题和 URL。开关是 `AGENT_ENABLE_WEB_SEARCH`。
+
+### `src/agent_project/tools/browser.py`
+
+轻量文本浏览器工具。当前暴露 `open_web_page(url, max_chars=20000, timeout_seconds=15)` 和 `list_web_page_links(url, max_links=30, timeout_seconds=15)`。
+
+它请求网页 HTML，跳过 `script`、`style`、`noscript`，抽取标题、正文和链接。开关是 `AGENT_ENABLE_BROWSER_TOOLS`。它不是完整浏览器自动化，不能运行 JavaScript、登录、点击动态按钮或截图。
+
+### `src/agent_project/tools/tasks.py`
+
+进程内多步骤任务队列工具。当前暴露 `create_task_queue`、`update_task_step`、`get_task_queue` 和 `list_task_queues`。
+
+任务步骤支持 `pending`、`in_progress`、`completed`、`blocked` 四种状态。队列保存在模块级字典里，重启程序后会丢失。
 
 ### `src/agent_project/tools/__init__.py`
 
@@ -229,4 +258,4 @@ agent.stream({"messages": messages}, stream_mode=["messages", "values"])
 
 这个机制对应“提权申请人类许可”：当 agent 想越过默认读取范围，或者想修改文件时，它会在终端列出操作、路径、原因，然后等待人类批准。
 
-如果未来要加 shell 命令执行、网络访问、数据库写入等能力，建议也沿用同样结构：独立 tool 模块 + 明确边界 + `_ask_human_approval()` 或更强的审批器。
+如果未来要加数据库写入、真实浏览器自动化等高风险能力，建议也沿用同样结构：独立 tool 模块 + 明确边界 + `_ask_human_approval()` 或更强的审批器。

@@ -8,6 +8,10 @@ import os
 from langchain_core.tools import tool
 
 from agent_project.tools.filesystem import list_local_directory, read_local_file, write_local_file
+from agent_project.tools.shell import execute_shell_command
+from agent_project.tools.web import web_search
+from agent_project.tools.browser import list_web_page_links, open_web_page
+from agent_project.tools.tasks import create_task_queue, get_task_queue, list_task_queues, update_task_step
 
 
 _BINARY_OPS = {
@@ -73,4 +77,12 @@ def get_tools():
         list_local_directory,
         read_local_file,
         write_local_file,
+        execute_shell_command,
+        web_search,
+        open_web_page,
+        list_web_page_links,
+        create_task_queue,
+        update_task_step,
+        get_task_queue,
+        list_task_queues,
     ]

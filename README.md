@@ -7,7 +7,11 @@
 - LangGraph `create_react_agent`
 - Tool calling
 - 本地文件读取、目录列表、写入
-- 写入和越权读取时向人类申请终端确认
+- 写入、越权读取和 shell 命令执行时向人类申请终端确认
+- shell 命令执行，用于项目检查和自动化验证
+- 自动联网搜索，基于 DuckDuckGo HTML 搜索页
+- 轻量浏览器操作：打开网页、抽取正文、列出链接
+- 进程内多步骤任务队列，用于规划和进度跟踪
 - 命令行交互
 - 简单可扩展的项目结构
 
@@ -20,7 +24,12 @@ agent_project/
     cli.py            # 命令行入口
     config.py         # 环境变量配置
     llms.py           # 多 provider 模型工厂
-    tools/basic.py    # 示例 tools
+    tools/basic.py    # tool 注册入口和基础 tools
+    tools/filesystem.py # 本地文件 tools
+    tools/shell.py     # shell 命令 tool
+    tools/web.py       # 联网搜索 tool
+    tools/browser.py   # 轻量浏览器 tools
+    tools/tasks.py     # 多步骤任务队列 tools
   examples/
     run_once.py       # 单次调用示例
 ```
@@ -73,6 +82,26 @@ OPENAI_COMPATIBLE_API_KEY=your-key
 OPENAI_COMPATIBLE_BASE_URL=https://api.deepseek.com/v1
 OPENAI_COMPATIBLE_MODEL=deepseek-chat
 ```
+
+## Shell、联网搜索、浏览器和任务队列
+
+新增能力都通过 `.env` 开关控制：
+
+```env
+AGENT_ENABLE_SHELL_COMMANDS=true
+AGENT_ENABLE_WEB_SEARCH=true
+AGENT_ENABLE_BROWSER_TOOLS=true
+```
+
+可用工具包括：
+
+- `execute_shell_command`：经过终端确认后执行 shell 命令，并返回 exit code、stdout、stderr。
+- `web_search`：联网搜索并返回搜索结果标题和 URL。
+- `open_web_page`：打开网页并返回标题和可读正文。
+- `list_web_page_links`：列出网页中的链接。
+- `create_task_queue` / `update_task_step` / `get_task_queue` / `list_task_queues`：创建和维护进程内任务队列。
+
+浏览器工具是轻量文本浏览器，不能运行 JavaScript、登录、点击动态按钮或截图；需要真实浏览器自动化时可再接 Playwright。任务队列保存在当前 Python 进程内，重启后会丢失。
 
 ## 添加 Tool
 

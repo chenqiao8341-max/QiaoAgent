@@ -18,6 +18,9 @@ class Settings:
     openai_compatible_model: str = "qwen-plus"
     agent_workspace_root: str | None = None
     agent_enable_human_approval: bool = True
+    agent_enable_shell_commands: bool = True
+    agent_enable_web_search: bool = True
+    agent_enable_browser_tools: bool = True
 
 
 def load_settings() -> Settings:
@@ -34,6 +37,18 @@ def load_settings() -> Settings:
         openai_compatible_model=os.getenv("OPENAI_COMPATIBLE_MODEL", "qwen-plus"),
         agent_workspace_root=os.getenv("AGENT_WORKSPACE_ROOT"),
         agent_enable_human_approval=os.getenv("AGENT_ENABLE_HUMAN_APPROVAL", "true")
+        .strip()
+        .lower()
+        in {"1", "true", "yes", "on"},
+        agent_enable_shell_commands=os.getenv("AGENT_ENABLE_SHELL_COMMANDS", "true")
+        .strip()
+        .lower()
+        in {"1", "true", "yes", "on"},
+        agent_enable_web_search=os.getenv("AGENT_ENABLE_WEB_SEARCH", "true")
+        .strip()
+        .lower()
+        in {"1", "true", "yes", "on"},
+        agent_enable_browser_tools=os.getenv("AGENT_ENABLE_BROWSER_TOOLS", "true")
         .strip()
         .lower()
         in {"1", "true", "yes", "on"},
