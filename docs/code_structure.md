@@ -129,6 +129,12 @@ shell 命令执行工具。当前暴露 `execute_shell_command(command, cwd=".",
 
 任务步骤支持 `pending`、`in_progress`、`completed`、`blocked` 四种状态。队列保存在模块级字典里，重启程序后会丢失。
 
+### `src/agent_project/tools/progress.py`
+
+工具进度输出模块。它提供 `emit_progress(message)`，默认把简短执行过程写到 stderr，例如正在读取哪个文件、搜索什么关键词、打开哪个 URL、写入多少字符和行数变化。
+
+开关由 `.env` 中的 `AGENT_SHOW_TOOL_PROGRESS` 控制，默认开启。关闭后工具仍正常执行，只是不再打印进度行。
+
 ### `src/agent_project/tools/__init__.py`
 
 工具模块的导出口。它把 `get_tools` 暴露给外部代码，方便 `agent.py` 用 `from agent_project.tools import get_tools` 导入。
@@ -163,7 +169,7 @@ agent 的核心组装文件。
 - 交互模式：直接运行 `agent-chat`，进入循环对话。
 - 单次模式：运行 `agent-chat 你的问题`，只调用一次然后退出。
 
-交互模式里会维护 `messages` 历史，所以 agent 可以看到前面的对话。打印回答时，它会走 `_stream_agent_response()`，内部调用 `agent.stream(..., stream_mode=["messages", "values"])`：`messages` 流负责实时打印模型文本，`values` 流负责拿到最终图状态并更新历史。
+交互模式里会维护 `messages` 历史，所以 agent 可以看到前面的对话。打印回答时，它会走 `_stream_agent_response()`，内部调用 `agent.stream(..., stream_mode=["messages", "values"])`：`messages` 流负责实时打印模型文本，`values` 流负责拿到最终图状态并更新历史。CLI 会等真正收到模型回答文本时才打印 `Agent:` 前缀，这样工具进度行可以先独立显示。
 
 ### `src/agent_project/__init__.py`
 

@@ -15,7 +15,8 @@ Use tools when they help answer accurately.
 Use local file tools when the user asks you to inspect or edit files.
 Use shell command tools when the user asks you to run commands or verify project behavior.
 Use web search and browser tools when current external information or page inspection is needed.
-For explicit search requests, call web_search before answering; only say search is unavailable if the tool returns an error.
+For explicit search requests, call web_search before answering.
+Only say search is unavailable if the tool returns an error.
 Use task queue tools to plan and track multi-step work.
 When a tool asks for human approval, wait for the user decision and respect it.
 Keep answers concise, but explain important assumptions."""

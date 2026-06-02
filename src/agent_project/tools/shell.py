@@ -6,6 +6,8 @@ from pathlib import Path
 
 from langchain_core.tools import tool
 
+from agent_project.tools.progress import emit_progress
+
 
 def _workspace_root() -> Path:
     configured = os.getenv("AGENT_WORKSPACE_ROOT")
@@ -65,13 +67,17 @@ def execute_shell_command(
     max_chars: int = 20000,
 ) -> str:
     """Execute a shell command after human approval and return stdout/stderr."""
+    emit_progress(f"preparing shell command: {command}")
     if not _shell_enabled():
+        emit_progress("shell command skipped: disabled by AGENT_ENABLE_SHELL_COMMANDS")
         return "Shell command execution is disabled by AGENT_ENABLE_SHELL_COMMANDS."
 
     workdir = _resolve_cwd(cwd)
     if not workdir.exists():
+        emit_progress(f"shell command rejected, cwd does not exist: {workdir}")
         return f"Working directory does not exist: {workdir}"
     if not workdir.is_dir():
+        emit_progress(f"shell command rejected, cwd is not a directory: {workdir}")
         return f"Working directory is not a directory: {workdir}"
 
     root = _workspace_root()
@@ -81,9 +87,11 @@ def execute_shell_command(
         reason = f"cwd is outside AGENT_WORKSPACE_ROOT={root} and shell commands require approval"
 
     if not _ask_human_approval(command, workdir, reason):
+        emit_progress(f"shell command denied: {command}")
         return f"Shell command denied: {reason}"
 
     timeout = max(1, min(timeout_seconds, 120))
+    emit_progress(f"running shell command in {workdir}: {command}")
     try:
         completed = subprocess.run(
             command,
@@ -95,6 +103,7 @@ def execute_shell_command(
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
+        emit_progress(f"shell command timed out after {timeout}s: {command}")
         output = ""
         if exc.stdout:
             output += f"stdout:\n{exc.stdout}\n"
@@ -104,6 +113,7 @@ def execute_shell_command(
             output = output[:max_chars] + f"\n\n[truncated after {max_chars} characters]"
         return f"Command timed out after {timeout} seconds.\n{output}".strip()
 
+    emit_progress(f"shell command finished with exit code {completed.returncode}: {command}")
     output_parts = [f"exit_code: {completed.returncode}"]
     if completed.stdout:
         output_parts.append(f"stdout:\n{completed.stdout}")

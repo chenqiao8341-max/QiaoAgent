@@ -93,6 +93,7 @@ agent-chat "问题"
 - `AGENT_ENABLE_SHELL_COMMANDS`：是否启用 shell 命令工具。
 - `AGENT_ENABLE_WEB_SEARCH`：是否启用联网搜索工具。
 - `AGENT_ENABLE_BROWSER_TOOLS`：是否启用轻量浏览器工具。
+- `AGENT_SHOW_TOOL_PROGRESS`：是否在终端显示工具执行过程。
 
 ### 4.2 `llms.py`
 
@@ -316,8 +317,30 @@ list_task_queues()
 | 自动联网搜索 | `tools/web.py` | 请求搜索页并解析标题和 URL |
 | 轻量浏览器操作 | `tools/browser.py` | 请求网页 HTML，抽取正文和链接 |
 | 多步骤任务队列 | `tools/tasks.py` | 用进程内字典保存任务队列和步骤状态 |
+| 工具执行过程可见化 | `tools/progress.py`, 各 tool 模块, `cli.py` | 工具执行时向 stderr 打印简短进度，CLI 等回答文本出现后再打印 `Agent:` |
 
-## 6. 人工审批机制
+## 6. 工具执行过程可见化
+
+当前项目通过 `tools/progress.py` 暴露 agent 的执行过程。核心函数是：
+
+```python
+emit_progress(message)
+```
+
+文件、shell、web、browser、task 工具会在开始、完成、失败或拒绝时调用它。终端会看到类似：
+
+```text
+[agent] searching web: weyl algebra automorphism
+[agent] search result: Example Domain -> https://example.com/
+[agent] reading file: /home/qiao/work/agent_project/README.md
+[agent] file write complete: /path/to/file.py (1200 chars, +8/-2 lines)
+```
+
+这个机制的关键点是：进度来自真实工具执行，不依赖模型自己描述流程。它默认开启，可以通过 `.env` 设置 `AGENT_SHOW_TOOL_PROGRESS=false` 关闭。
+
+CLI 的 `_stream_agent_response()` 会等收到模型回答文本时才打印 `Agent:` 前缀，避免工具进度行被挤到最终回答前缀后面。
+
+## 7. 人工审批机制
 
 当前项目的人工审批通过终端输入实现。
 
@@ -341,7 +364,7 @@ Allow this operation? Type yes to approve:
 
 联网搜索和浏览器读取默认不走人工审批，但可以通过环境变量关闭。
 
-## 7. ReAct Agent 原理
+## 8. ReAct Agent 原理
 
 ReAct 是 Reasoning + Acting 的缩写。
 
@@ -357,7 +380,7 @@ ReAct 是 Reasoning + Acting 的缩写。
 
 所以 agent 的能力不是只来自模型本身，还来自 `get_tools()` 注册进去的工具。
 
-## 8. 如何新增一个能力
+## 9. 如何新增一个能力
 
 新增能力通常按这个流程：
 
@@ -386,7 +409,7 @@ def get_tools():
     ]
 ```
 
-## 9. 当前限制
+## 10. 当前限制
 
 当前项目仍然不具备这些能力：
 
@@ -406,7 +429,7 @@ def get_tools():
 - 增加 web API 服务。
 - 给 shell 工具增加命令白名单、黑名单和审计日志。
 
-## 10. 学习建议
+## 11. 学习建议
 
 建议按这个顺序阅读源码：
 

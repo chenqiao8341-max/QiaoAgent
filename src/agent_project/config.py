@@ -21,6 +21,7 @@ class Settings:
     agent_enable_shell_commands: bool = True
     agent_enable_web_search: bool = True
     agent_enable_browser_tools: bool = True
+    agent_show_tool_progress: bool = True
 
 
 def load_settings() -> Settings:
@@ -32,7 +33,9 @@ def load_settings() -> Settings:
         openai_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
         google_model=os.getenv("GOOGLE_MODEL", "gemini-1.5-flash"),
         anthropic_model=os.getenv("ANTHROPIC_MODEL", "claude-3-5-haiku-latest"),
-        openai_compatible_api_key=os.getenv("OPENAI_COMPATIBLE_API_KEY") or os.getenv("DASHSCOPE_API_KEY"),
+        openai_compatible_api_key=(
+            os.getenv("OPENAI_COMPATIBLE_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
+        ),
         openai_compatible_base_url=os.getenv("OPENAI_COMPATIBLE_BASE_URL"),
         openai_compatible_model=os.getenv("OPENAI_COMPATIBLE_MODEL", "qwen-plus"),
         agent_workspace_root=os.getenv("AGENT_WORKSPACE_ROOT"),
@@ -49,6 +52,10 @@ def load_settings() -> Settings:
         .lower()
         in {"1", "true", "yes", "on"},
         agent_enable_browser_tools=os.getenv("AGENT_ENABLE_BROWSER_TOOLS", "true")
+        .strip()
+        .lower()
+        in {"1", "true", "yes", "on"},
+        agent_show_tool_progress=os.getenv("AGENT_SHOW_TOOL_PROGRESS", "true")
         .strip()
         .lower()
         in {"1", "true", "yes", "on"},

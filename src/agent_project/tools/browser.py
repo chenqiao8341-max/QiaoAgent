@@ -8,6 +8,7 @@ from urllib.parse import urljoin, urlparse
 
 from langchain_core.tools import tool
 
+from agent_project.tools.progress import emit_progress
 from agent_project.tools.web import _fetch_url
 
 
@@ -49,7 +50,19 @@ class _PageParser(HTMLParser):
                 self._link_text_parts = []
                 self.text_parts.append(" ")
             return
-        if tag in {"p", "div", "section", "article", "header", "footer", "li", "br", "h1", "h2", "h3"}:
+        if tag in {
+            "p",
+            "div",
+            "section",
+            "article",
+            "header",
+            "footer",
+            "li",
+            "br",
+            "h1",
+            "h2",
+            "h3",
+        }:
             self.text_parts.append("\n")
 
     def handle_data(self, data: str) -> None:
@@ -88,22 +101,32 @@ class _PageParser(HTMLParser):
 @tool
 def open_web_page(url: str, max_chars: int = 20000, timeout_seconds: int = 15) -> str:
     """Open a web page with a lightweight text browser and return readable text."""
+    emit_progress(f"opening web page: {url}")
     if not _env_bool("AGENT_ENABLE_BROWSER_TOOLS", True):
+        emit_progress("browser open skipped: disabled by AGENT_ENABLE_BROWSER_TOOLS")
         return "Browser tools are disabled by AGENT_ENABLE_BROWSER_TOOLS."
 
     try:
         html, content_type = _fetch_url(url, timeout_seconds=timeout_seconds)
     except Exception as exc:
+        emit_progress(f"browser open failed: {exc}")
         return f"Browser open error: {exc}"
 
     if "html" not in content_type.lower() and content_type:
+        emit_progress(f"browser fetched non-HTML content: {url} ({content_type})")
         return f"Fetched non-HTML content from {url}. Content-Type: {content_type}"
 
     parser = _PageParser(url)
     parser.feed(html)
     title = _normalize_space(parser.title) or "(no title)"
     text = parser.page_text()
-    output = f"URL: {url}\nTitle: {title}\n\n{text}" if text else f"URL: {url}\nTitle: {title}\n\n(no readable text found)"
+    emit_progress(
+        f"web page read complete: {title} ({len(text)} text chars, {len(parser.links)} links)"
+    )
+    if text:
+        output = f"URL: {url}\nTitle: {title}\n\n{text}"
+    else:
+        output = f"URL: {url}\nTitle: {title}\n\n(no readable text found)"
 
     if max_chars > 0 and len(output) > max_chars:
         return output[:max_chars] + f"\n\n[truncated after {max_chars} characters]"
@@ -113,20 +136,25 @@ def open_web_page(url: str, max_chars: int = 20000, timeout_seconds: int = 15) -
 @tool
 def list_web_page_links(url: str, max_links: int = 30, timeout_seconds: int = 15) -> str:
     """Open a web page and list links found in the HTML."""
+    emit_progress(f"listing links on web page: {url}")
     if not _env_bool("AGENT_ENABLE_BROWSER_TOOLS", True):
+        emit_progress("link listing skipped: disabled by AGENT_ENABLE_BROWSER_TOOLS")
         return "Browser tools are disabled by AGENT_ENABLE_BROWSER_TOOLS."
 
     try:
         html, _content_type = _fetch_url(url, timeout_seconds=timeout_seconds)
     except Exception as exc:
+        emit_progress(f"link extraction failed: {exc}")
         return f"Browser link extraction error: {exc}"
 
     parser = _PageParser(url)
     parser.feed(html)
     links = parser.links[: max(1, min(max_links, 100))]
     if not links:
+        emit_progress(f"link listing complete: {url} (0 links)")
         return f"No links found on {url}."
 
+    emit_progress(f"link listing complete: {url} ({len(links)} links shown)")
     lines = [f"Links found on {url}:"]
     for index, (label, href) in enumerate(links, start=1):
         lines.append(f"{index}. {label}\n   {href}")

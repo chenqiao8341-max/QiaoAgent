@@ -11,8 +11,7 @@ from agent_project.config import load_settings
 
 def _stream_agent_response(agent: Any, messages: list) -> list:
     """Stream the latest agent response and return the updated message history."""
-    print("\nAgent: ", end="", flush=True)
-
+    started_answer = False
     latest_messages = messages
     for stream_mode, chunk in agent.stream(
         {"messages": messages},
@@ -25,12 +24,16 @@ def _stream_agent_response(agent: Any, messages: list) -> list:
 
             text = message_content_to_text(message_chunk.content)
             if text:
+                if not started_answer:
+                    print("\nAgent: ", end="", flush=True)
+                    started_answer = True
                 print(text, end="", flush=True)
 
         elif stream_mode == "values":
             latest_messages = chunk["messages"]
 
-    print()
+    if started_answer:
+        print()
     return latest_messages
 
 

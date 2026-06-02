@@ -12,6 +12,7 @@
 - 自动联网搜索，基于 DuckDuckGo HTML 搜索页
 - 轻量浏览器操作：打开网页、抽取正文、列出链接
 - 进程内多步骤任务队列，用于规划和进度跟踪
+- 工具执行过程可见化：读取文件、检索网页、执行命令、更新任务时输出进度
 - 命令行交互
 - 简单可扩展的项目结构
 
@@ -102,6 +103,25 @@ AGENT_ENABLE_BROWSER_TOOLS=true
 - `create_task_queue` / `update_task_step` / `get_task_queue` / `list_task_queues`：创建和维护进程内任务队列。
 
 浏览器工具是轻量文本浏览器，不能运行 JavaScript、登录、点击动态按钮或截图；需要真实浏览器自动化时可再接 Playwright。任务队列保存在当前 Python 进程内，重启后会丢失。
+
+## 执行过程可见化
+
+工具执行时会在终端输出简短进度行，例如：
+
+```text
+[agent] searching web: weyl algebra automorphism
+[agent] search result: Example Domain -> https://example.com/
+[agent] reading file: /home/qiao/work/agent_project/README.md
+[agent] file write complete: /path/to/file.py (1200 chars, +8/-2 lines)
+```
+
+这个功能默认开启，可以通过 `.env` 关闭：
+
+```env
+AGENT_SHOW_TOOL_PROGRESS=false
+```
+
+进度行只说明工具正在做什么和结果规模，不会替代工具返回值，也不会改变 agent 的推理流程。
 
 ## 添加 Tool
 

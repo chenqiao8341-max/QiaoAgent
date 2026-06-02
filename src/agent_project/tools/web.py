@@ -9,6 +9,8 @@ from urllib.request import Request, urlopen
 
 from langchain_core.tools import tool
 
+from agent_project.tools.progress import emit_progress
+
 
 USER_AGENT = "agent-project/0.1 (+https://example.local)"
 
@@ -55,7 +57,12 @@ class _SearchParser(HTMLParser):
         if tag != "a":
             return
         attr_map = dict(attrs)
-        class_names = set((attr_map.get("class") or "").replace(chr(39), " ").replace(chr(34), " ").split())
+        class_names = set(
+            (attr_map.get("class") or "")
+            .replace(chr(39), " ")
+            .replace(chr(34), " ")
+            .split()
+        )
         if not ({"result-link", "result__a"} & class_names):
             return
         href = attr_map.get("href")
@@ -104,7 +111,9 @@ def _clean_duckduckgo_url(href: str) -> str:
 @tool
 def web_search(query: str, max_results: int = 5, timeout_seconds: int = 10) -> str:
     """Search the web and return result titles and URLs."""
+    emit_progress(f"searching web: {query}")
     if not _env_bool("AGENT_ENABLE_WEB_SEARCH", True):
+        emit_progress("web search skipped: disabled by AGENT_ENABLE_WEB_SEARCH")
         return "Web search is disabled by AGENT_ENABLE_WEB_SEARCH."
 
     max_results = max(1, min(max_results, 10))
@@ -112,16 +121,23 @@ def web_search(query: str, max_results: int = 5, timeout_seconds: int = 10) -> s
     try:
         html, _content_type = _fetch_url(url, timeout_seconds=timeout_seconds)
     except Exception as exc:
+        emit_progress(f"web search failed: {exc}")
         return f"Web search error: {exc}"
 
     if "anomaly.js" in html or "challenge-form" in html:
+        emit_progress("web search blocked by provider anti-bot challenge")
         return "Web search error: search provider returned an anti-bot challenge."
 
     parser = _SearchParser()
     parser.feed(html)
     results = parser.results[:max_results]
     if not results:
+        emit_progress(f"web search complete: {query} (0 results)")
         return "No web search results found."
+
+    emit_progress(f"web search complete: {query} ({len(results)} results)")
+    for title, href in results[:3]:
+        emit_progress(f"search result: {title} -> {href}")
 
     lines = [f"Search results for: {query}"]
     for index, (title, href) in enumerate(results, start=1):
