@@ -66,15 +66,39 @@ Python 项目的包配置文件。它定义了：
 
 定义 agent 可以调用的工具。
 
-当前有三个示例 tool：
+当前有六个工具：
 
 - `calculator`：计算简单数值表达式。
 - `current_time`：返回本地当前时间。
 - `configured_provider`：返回当前配置的 provider。
+- `list_local_directory`：列出本地目录。
+- `read_local_file`：读取本地文本文件。
+- `write_local_file`：经过人类确认后写入本地文本文件。
 
-LangChain 通过 `@tool` 装饰器把普通 Python 函数包装成可被模型 tool call 的工具。`get_tools()` 返回工具列表，`agent.py` 会读取它。
+LangChain 通过 `@tool` 装饰器把普通 Python 函数包装成可被模型 tool call 的工具。`get_tools()` 返回工具列表，`agent.py` 会读取它。文件工具是在 `filesystem.py` 中定义，再由 `basic.py` 统一注册。
 
 如果你要新增工具，通常在这里添加函数，然后加入 `get_tools()`。
+
+### `src/agent_project/tools/filesystem.py`
+
+本地文件访问工具模块。它让 agent 可以通过 tool call 读取目录、读取文本文件、写入文本文件。
+
+当前暴露三个工具：
+
+- `list_local_directory(path=".")`：列出本地目录内容。
+- `read_local_file(path, max_chars=20000)`：读取 UTF-8 文本文件，超过长度会截断返回。
+- `write_local_file(path, content, mode="overwrite")`：写入或追加 UTF-8 文本文件。
+
+它的权限边界由 `.env` 控制：
+
+```env
+AGENT_WORKSPACE_ROOT=/home/qiao/work/agent_project
+AGENT_ENABLE_HUMAN_APPROVAL=true
+```
+
+策略是：工作目录内读取直接允许；工作目录外读取需要人类确认；任何写入都需要人类确认。确认流程由 `_ask_human_approval()` 完成，它会在终端打印操作、路径、原因，并要求输入完整的 `yes`。
+
+这个模块相当于给 agent 加了一层“本机文件能力 + 人类审批闸门”。它不是操作系统级权限系统，而是 agent 工具层面的许可流程。
 
 ### `src/agent_project/tools/__init__.py`
 
@@ -186,3 +210,23 @@ agent.stream({"messages": messages}, stream_mode=["messages", "values"])
 - 想给 API 复用：可以把 `_stream_agent_response()` 的核心逻辑抽到 `agent.py`，让 CLI 和 Web/API 层共享。
 
 注意：单次模式 `agent-chat "问题"` 现在仍然使用 `invoke_agent()` 一次性返回；只有交互模式 `agent-chat` 是流式输出。
+
+
+## 本地文件读写和人类许可
+
+文件能力由 `src/agent_project/tools/filesystem.py` 提供。agent 并不是直接拥有无限制的本机权限，而是通过 LangChain tool call 请求这些操作。
+
+读取规则：
+
+- 路径在 `AGENT_WORKSPACE_ROOT` 内：允许读取。
+- 路径在 `AGENT_WORKSPACE_ROOT` 外：调用 `_ask_human_approval()`，需要终端输入 `yes`。
+
+写入规则：
+
+- 任何写入都调用 `_ask_human_approval()`。
+- 只有输入完整的 `yes` 才执行写入。
+- 写入模式支持 `overwrite` 和 `append`。
+
+这个机制对应“提权申请人类许可”：当 agent 想越过默认读取范围，或者想修改文件时，它会在终端列出操作、路径、原因，然后等待人类批准。
+
+如果未来要加 shell 命令执行、网络访问、数据库写入等能力，建议也沿用同样结构：独立 tool 模块 + 明确边界 + `_ask_human_approval()` 或更强的审批器。

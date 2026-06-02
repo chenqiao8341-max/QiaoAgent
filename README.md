@@ -6,6 +6,8 @@
 - OpenAI-compatible API 接入，例如 DeepSeek、Kimi、DashScope/Qwen、local vLLM
 - LangGraph `create_react_agent`
 - Tool calling
+- 本地文件读取、目录列表、写入
+- 写入和越权读取时向人类申请终端确认
 - 命令行交互
 - 简单可扩展的项目结构
 
@@ -59,6 +61,7 @@ MODEL_PROVIDER=openai
 - `google`
 - `anthropic`
 - `openai-compatible`
+- `dashscope` / `bailian` / `aliyun`
 
 对应模型名可通过 `OPENAI_MODEL`、`GOOGLE_MODEL`、`ANTHROPIC_MODEL` 配置。
 
@@ -85,3 +88,61 @@ def your_tool(input_text: str) -> str:
 ```
 
 然后把它加入 `get_tools()` 返回列表即可。
+
+
+## 本地文件访问
+
+当前 agent 内置三个文件工具：
+
+- `list_local_directory`：列出本地目录。
+- `read_local_file`：读取 UTF-8 文本文件。
+- `write_local_file`：写入或追加 UTF-8 文本文件。
+
+默认通过 `.env` 控制文件工具边界：
+
+```env
+AGENT_WORKSPACE_ROOT=/home/qiao/work/agent_project
+AGENT_ENABLE_HUMAN_APPROVAL=true
+```
+
+权限策略：
+
+- 读取 `AGENT_WORKSPACE_ROOT` 内的文件或目录：直接允许。
+- 读取 `AGENT_WORKSPACE_ROOT` 外的路径：终端请求人类确认。
+- 写入任何路径：终端请求人类确认。
+
+当需要确认时，终端会显示类似：
+
+```text
+[approval required]
+Action: write local file
+Path: /path/to/file.txt
+Reason: write operations require explicit human approval
+Allow this operation? Type yes to approve:
+```
+
+只有输入完整的 `yes` 才会执行；其他输入都会拒绝。
+
+
+
+
+## 阿里云百炼配置
+
+百炼按量计费的 OpenAI 兼容接口需要配置正确的地域 Base URL 和模型名。中国内地北京地域通常使用：
+
+```env
+MODEL_PROVIDER=openai-compatible
+OPENAI_COMPATIBLE_API_KEY=你的百炼APIKey
+OPENAI_COMPATIBLE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+OPENAI_COMPATIBLE_MODEL=qwen3.6-plus
+```
+
+也可以使用 provider 别名：
+
+```env
+MODEL_PROVIDER=dashscope
+DASHSCOPE_API_KEY=你的百炼APIKey
+OPENAI_COMPATIBLE_MODEL=qwen-plus
+```
+
+注意模型名是 `qwen3.6-plus`，不是 `qwen-3.6-plus`。不同地域的 API Key 和 Base URL 不通用。

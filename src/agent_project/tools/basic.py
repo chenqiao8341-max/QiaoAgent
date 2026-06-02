@@ -7,6 +7,8 @@ import os
 
 from langchain_core.tools import tool
 
+from agent_project.tools.filesystem import list_local_directory, read_local_file, write_local_file
+
 
 _BINARY_OPS = {
     ast.Add: operator.add,
@@ -64,4 +66,11 @@ def configured_provider() -> str:
 
 
 def get_tools():
-    return [calculator, current_time, configured_provider]
+    return [
+        calculator,
+        current_time,
+        configured_provider,
+        list_local_directory,
+        read_local_file,
+        write_local_file,
+    ]

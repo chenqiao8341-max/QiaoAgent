@@ -15,7 +15,9 @@ class Settings:
     anthropic_model: str = "claude-3-5-haiku-latest"
     openai_compatible_api_key: str | None = None
     openai_compatible_base_url: str | None = None
-    openai_compatible_model: str = "deepseek-chat"
+    openai_compatible_model: str = "qwen-plus"
+    agent_workspace_root: str | None = None
+    agent_enable_human_approval: bool = True
 
 
 def load_settings() -> Settings:
@@ -27,7 +29,12 @@ def load_settings() -> Settings:
         openai_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
         google_model=os.getenv("GOOGLE_MODEL", "gemini-1.5-flash"),
         anthropic_model=os.getenv("ANTHROPIC_MODEL", "claude-3-5-haiku-latest"),
-        openai_compatible_api_key=os.getenv("OPENAI_COMPATIBLE_API_KEY"),
+        openai_compatible_api_key=os.getenv("OPENAI_COMPATIBLE_API_KEY") or os.getenv("DASHSCOPE_API_KEY"),
         openai_compatible_base_url=os.getenv("OPENAI_COMPATIBLE_BASE_URL"),
-        openai_compatible_model=os.getenv("OPENAI_COMPATIBLE_MODEL", "deepseek-chat"),
+        openai_compatible_model=os.getenv("OPENAI_COMPATIBLE_MODEL", "qwen-plus"),
+        agent_workspace_root=os.getenv("AGENT_WORKSPACE_ROOT"),
+        agent_enable_human_approval=os.getenv("AGENT_ENABLE_HUMAN_APPROVAL", "true")
+        .strip()
+        .lower()
+        in {"1", "true", "yes", "on"},
     )
