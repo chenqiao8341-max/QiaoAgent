@@ -16,6 +16,9 @@ class Settings:
     openai_compatible_api_key: str | None = None
     openai_compatible_base_url: str | None = None
     openai_compatible_model: str = "qwen-plus"
+    local_vllm_api_key: str = "local-vllm"
+    local_vllm_base_url: str = "http://127.0.0.1:8000/v1"
+    local_vllm_model: str = "qwen-3.6-35b-a3b"
     agent_workspace_root: str | None = None
     agent_enable_human_approval: bool = True
     agent_enable_shell_commands: bool = True
@@ -38,6 +41,11 @@ def load_settings() -> Settings:
         ),
         openai_compatible_base_url=os.getenv("OPENAI_COMPATIBLE_BASE_URL"),
         openai_compatible_model=os.getenv("OPENAI_COMPATIBLE_MODEL", "qwen-plus"),
+        local_vllm_api_key=os.getenv("LOCAL_VLLM_API_KEY", "local-vllm"),
+        local_vllm_base_url=os.getenv(
+            "LOCAL_VLLM_BASE_URL", "http://127.0.0.1:8000/v1"
+        ),
+        local_vllm_model=os.getenv("LOCAL_VLLM_MODEL", "qwen-3.6-35b-a3b"),
         agent_workspace_root=os.getenv("AGENT_WORKSPACE_ROOT"),
         agent_enable_human_approval=os.getenv("AGENT_ENABLE_HUMAN_APPROVAL", "true")
         .strip()

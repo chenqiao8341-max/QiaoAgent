@@ -88,6 +88,9 @@ agent-chat "问题"
 - `OPENAI_COMPATIBLE_API_KEY`：OpenAI-compatible API key。
 - `OPENAI_COMPATIBLE_BASE_URL`：OpenAI-compatible API 地址。
 - `OPENAI_COMPATIBLE_MODEL`：OpenAI-compatible 模型名。
+- `LOCAL_VLLM_BASE_URL`：本地 vLLM OpenAI-compatible API 地址，默认 `http://127.0.0.1:8000/v1`。
+- `LOCAL_VLLM_MODEL`：本地 vLLM 暴露的模型名，默认 `qwen-3.6-35b-a3b`。
+- `LOCAL_VLLM_API_KEY`：本地 vLLM 占位 API key，默认 `local-vllm`。
 - `AGENT_WORKSPACE_ROOT`：本地文件和 shell 工具的默认工作边界。
 - `AGENT_ENABLE_HUMAN_APPROVAL`：是否启用人工审批。
 - `AGENT_ENABLE_SHELL_COMMANDS`：是否启用 shell 命令工具。
@@ -109,9 +112,14 @@ build_chat_model(settings)
 - `google` -> `ChatGoogleGenerativeAI`
 - `anthropic` -> `ChatAnthropic`
 - `openai-compatible` -> 带 `base_url` 的 `ChatOpenAI`
+- `local-vllm` / `vllm` / `local` -> 默认连接本机 vLLM `http://127.0.0.1:8000/v1`
 - `dashscope` / `bailian` / `aliyun` -> 默认使用阿里云 DashScope OpenAI 兼容地址
 
 这个模块的原理是“模型工厂”：上层代码不关心具体 provider，只调用 `build_chat_model()`，由它返回一个统一接口的 chat model。
+
+本地 vLLM provider 也是通过 `ChatOpenAI` 接入，因为 vLLM 暴露的是 OpenAI-compatible API。`llms.py` 会在使用 `local-vllm` 时把 `127.0.0.1` 或 `localhost` 加入 `NO_PROXY/no_proxy`，避免本地请求被系统代理转发。
+
+`LOCAL_VLLM_MODEL` 应该和 `/home/qiao/work/llm_deploy/model_registry.json` 中对应模型的 `served_model_name` 一致。例如当前 `qwen-3.6-35b-a3b`。
 
 ### 4.3 `agent.py`
 

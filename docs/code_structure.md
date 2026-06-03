@@ -14,9 +14,10 @@
 
 关键配置包括：
 
-- `MODEL_PROVIDER`：选择模型供应商，例如 `openai`、`google`、`anthropic`、`openai-compatible`。
+- `MODEL_PROVIDER`：选择模型供应商，例如 `openai`、`google`、`anthropic`、`openai-compatible`、`local-vllm`。
 - `OPENAI_MODEL` / `GOOGLE_MODEL` / `ANTHROPIC_MODEL`：各 provider 的模型名。
-- `OPENAI_COMPATIBLE_BASE_URL`：用于 DeepSeek、Kimi、DashScope/Qwen、local vLLM 这类兼容 OpenAI API 的服务。
+- `OPENAI_COMPATIBLE_BASE_URL`：用于 DeepSeek、Kimi、DashScope/Qwen 这类兼容 OpenAI API 的云端服务。
+- `LOCAL_VLLM_BASE_URL` / `LOCAL_VLLM_MODEL`：用于本机 vLLM OpenAI-compatible 服务。
 - `MODEL_TEMPERATURE`：控制模型输出随机性。
 
 ### `.env`
@@ -59,8 +60,11 @@ Python 项目的包配置文件。它定义了：
 - `google` -> `ChatGoogleGenerativeAI`
 - `anthropic` -> `ChatAnthropic`
 - `openai-compatible` -> 带 `base_url` 的 `ChatOpenAI`
+- `local-vllm` / `vllm` / `local` -> 默认指向 `http://127.0.0.1:8000/v1` 的 `ChatOpenAI`
 
 如果以后要接新 provider，通常优先改这个文件。
+
+本地 vLLM 服务由 `/home/qiao/work/llm_deploy` 启动，模型名应使用 `model_registry.json` 里的 `served_model_name`。`local-vllm` provider 会自动设置 `NO_PROXY/no_proxy`，避免 `127.0.0.1` 请求经过代理。
 
 ### `src/agent_project/tools/basic.py`
 

@@ -2,8 +2,8 @@
 
 一个基础 LangChain + LangGraph agent 项目，支持：
 
-- OpenAI / Google Gemini / Anthropic provider 切换
-- OpenAI-compatible API 接入，例如 DeepSeek、Kimi、DashScope/Qwen、local vLLM
+- OpenAI / Google Gemini / Anthropic / 本地 vLLM provider 切换
+- OpenAI-compatible API 接入，例如 DeepSeek、Kimi、DashScope/Qwen、本地 vLLM
 - LangGraph `create_react_agent`
 - Tool calling
 - 本地文件读取、目录列表、写入
@@ -71,6 +71,7 @@ MODEL_PROVIDER=openai
 - `google`
 - `anthropic`
 - `openai-compatible`
+- `local-vllm` / `vllm` / `local`
 - `dashscope` / `bailian` / `aliyun`
 
 对应模型名可通过 `OPENAI_MODEL`、`GOOGLE_MODEL`、`ANTHROPIC_MODEL` 配置。
@@ -83,6 +84,24 @@ OPENAI_COMPATIBLE_API_KEY=your-key
 OPENAI_COMPATIBLE_BASE_URL=https://api.deepseek.com/v1
 OPENAI_COMPATIBLE_MODEL=deepseek-chat
 ```
+
+接入本地 vLLM 服务时，先用 `/home/qiao/work/llm_deploy` 启动模型，例如：
+
+```bash
+python3 /home/qiao/work/llm_deploy/llmctl.py start qwen-3.6-35b-a3b --sudo
+python3 /home/qiao/work/llm_deploy/llmctl.py health --base-url http://127.0.0.1:8000
+```
+
+然后在 `.env` 中设置：
+
+```env
+MODEL_PROVIDER=local-vllm
+LOCAL_VLLM_BASE_URL=http://127.0.0.1:8000/v1
+LOCAL_VLLM_MODEL=qwen-3.6-35b-a3b
+LOCAL_VLLM_API_KEY=local-vllm
+```
+
+`LOCAL_VLLM_MODEL` 要和 `work/llm_deploy/model_registry.json` 里的 `served_model_name` 一致。`local-vllm` provider 会自动把 `127.0.0.1` / `localhost` 加入 `NO_PROXY`，避免本地请求被系统代理转发。
 
 ## Shell、联网搜索、浏览器和任务队列
 
