@@ -8,6 +8,7 @@ import os
 from langchain_core.tools import tool
 
 from agent_project.tools.filesystem import list_local_directory, read_local_file, write_local_file
+from agent_project.tools.memory import delete_memory, get_memory, remember_memory, search_memories
 from agent_project.tools.shell import execute_shell_command
 from agent_project.tools.web import web_search
 from agent_project.tools.browser import list_web_page_links, open_web_page
@@ -86,6 +87,10 @@ def get_tools():
         web_search,
         open_web_page,
         list_web_page_links,
+        remember_memory,
+        search_memories,
+        get_memory,
+        delete_memory,
         create_task_queue,
         update_task_step,
         get_task_queue,

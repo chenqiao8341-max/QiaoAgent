@@ -91,6 +91,8 @@ agent-chat "问题"
 - `LOCAL_VLLM_BASE_URL`：本地 vLLM OpenAI-compatible API 地址，默认 `http://127.0.0.1:8000/v1`。
 - `LOCAL_VLLM_MODEL`：本地 vLLM 暴露的模型名，默认 `qwen-3.6-35b-a3b`。
 - `LOCAL_VLLM_API_KEY`：本地 vLLM 占位 API key，默认 `local-vllm`。
+- `AGENT_STATE_DB_PATH`：SQLite 长期记忆和持久任务队列数据库路径。
+- `AGENT_MEMORY_CONTEXT_LIMIT`：构建 agent 时自动注入最近多少条 default namespace 记忆，设为 `0` 关闭。
 - `AGENT_WORKSPACE_ROOT`：本地文件和 shell 工具的默认工作边界。
 - `AGENT_ENABLE_HUMAN_APPROVAL`：是否启用人工审批。
 - `AGENT_ENABLE_SHELL_COMMANDS`：是否启用 shell 命令工具。
@@ -137,7 +139,8 @@ build_chat_model(settings)
 - 文件相关问题可以用本地文件工具。
 - 命令执行和项目验证可以用 shell 工具。
 - 当前外部信息或网页检查可以用 web search 和 browser 工具。
-- 多步骤工作可以用 task queue 工具跟踪。
+- 长期偏好、项目事实和可复用上下文可以用 memory 工具保存和检索。
+- 多步骤工作可以用持久化 task queue 工具跟踪。
 - 工具要求人工确认时必须等待并尊重用户决定。
 
 `invoke_agent()` 用于单次调用，适合 CLI 单次模式、脚本或未来 API 服务复用。
@@ -178,6 +181,10 @@ agent.stream({"messages": messages}, stream_mode=["messages", "values"])
 - `web_search`
 - `open_web_page`
 - `list_web_page_links`
+- `remember_memory`
+- `search_memories`
+- `get_memory`
+- `delete_memory`
 - `create_task_queue`
 - `update_task_step`
 - `get_task_queue`
@@ -276,9 +283,30 @@ AGENT_ENABLE_BROWSER_TOOLS=true
 
 当前是“文本浏览器”，不是完整浏览器自动化。它不能运行 JavaScript，不能点击动态按钮，不能登录，也不能截图。后续如果需要真实浏览器控制，可以接入 Playwright。
 
-### 4.10 `tools/tasks.py`
+### 4.10 `tools/storage.py`
 
-`tasks.py` 提供多步骤任务队列能力。
+`storage.py` 是 SQLite 存储基础模块。它负责：
+
+- 解析 `AGENT_STATE_DB_PATH`。
+- 默认使用 `AGENT_WORKSPACE_ROOT/.agent_state/agent.sqlite3`。
+- 初始化 `memories`、`task_queues`、`task_steps` 三张表。
+
+### 4.11 `tools/memory.py`
+
+`memory.py` 提供长期记忆能力。当前工具：
+
+```python
+remember_memory(content, namespace="default", source="", tags="")
+search_memories(query="", namespace="default", limit=10)
+get_memory(memory_id)
+delete_memory(memory_id)
+```
+
+长期记忆适合保存用户偏好、项目事实、反复会用到的上下文。它不是向量数据库，目前用 SQLite `LIKE` 做关键词检索。
+
+### 4.12 `tools/tasks.py`
+
+`tasks.py` 提供 SQLite 持久化多步骤任务队列能力。
 
 当前工具：
 
@@ -304,7 +332,7 @@ list_task_queues()
 - 创建队列时生成短 ID。
 - 更新任务时通过 queue ID 和 step index 定位具体步骤。
 
-当前任务队列是进程内内存数据，重启程序后会丢失。后续如果要长期保存，可以写入 JSON、SQLite 或项目数据库。
+当前任务队列写入 SQLite，重启程序后仍然保留。
 
 ## 5. 当前能力和对应代码
 
@@ -324,7 +352,8 @@ list_task_queues()
 | shell 命令执行 | `tools/shell.py` | 人工确认后调用 `subprocess.run()` |
 | 自动联网搜索 | `tools/web.py` | 请求搜索页并解析标题和 URL |
 | 轻量浏览器操作 | `tools/browser.py` | 请求网页 HTML，抽取正文和链接 |
-| 多步骤任务队列 | `tools/tasks.py` | 用进程内字典保存任务队列和步骤状态 |
+| 长期记忆 | `tools/memory.py`, `tools/storage.py` | 用 SQLite 保存和检索持久记忆 |
+| 多步骤任务队列 | `tools/tasks.py`, `tools/storage.py` | 用 SQLite 保存任务队列和步骤状态 |
 | 工具执行过程可见化 | `tools/progress.py`, 各 tool 模块, `cli.py` | 工具执行时向 stderr 打印简短进度，CLI 等回答文本出现后再打印 `Agent:` |
 
 ## 6. 工具执行过程可见化
@@ -422,7 +451,7 @@ def get_tools():
 当前项目仍然不具备这些能力：
 
 - 真实浏览器自动化：不能运行 JavaScript、不能登录、不能截图、不能点击动态按钮。
-- 长期记忆：任务队列和对话状态没有持久化。
+- 对话历史持久化：当前长期记忆和任务队列已持久化，但完整对话 transcript 还没有自动写入数据库。
 - 结构化 planner：任务队列只是状态跟踪工具，不会强制 agent 按计划执行。
 - 多 agent 协作。
 - Web API 服务。
@@ -432,7 +461,7 @@ def get_tools():
 后续可以继续扩展：
 
 - 用 Playwright 实现真实浏览器操作。
-- 用 SQLite/JSON 持久化任务队列和长期记忆。
+- 给长期记忆增加向量检索或全文检索。
 - 增加 planner/executor 分层。
 - 增加 web API 服务。
 - 给 shell 工具增加命令白名单、黑名单和审计日志。

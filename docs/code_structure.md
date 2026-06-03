@@ -18,6 +18,8 @@
 - `OPENAI_MODEL` / `GOOGLE_MODEL` / `ANTHROPIC_MODEL`：各 provider 的模型名。
 - `OPENAI_COMPATIBLE_BASE_URL`：用于 DeepSeek、Kimi、DashScope/Qwen 这类兼容 OpenAI API 的云端服务。
 - `LOCAL_VLLM_BASE_URL` / `LOCAL_VLLM_MODEL`：用于本机 vLLM OpenAI-compatible 服务。
+- `AGENT_STATE_DB_PATH`：SQLite 长期记忆和持久任务队列数据库路径。
+- `AGENT_MEMORY_CONTEXT_LIMIT`：自动注入到系统提示词里的最近记忆数量。
 - `MODEL_TEMPERATURE`：控制模型输出随机性。
 
 ### `.env`
@@ -82,7 +84,8 @@ Python 项目的包配置文件。它定义了：
 - `web_search`：联网搜索并返回标题和 URL。
 - `open_web_page`：打开网页并返回可读正文。
 - `list_web_page_links`：列出网页链接。
-- `create_task_queue` / `update_task_step` / `get_task_queue` / `list_task_queues`：维护进程内多步骤任务队列。
+- `remember_memory` / `search_memories` / `get_memory` / `delete_memory`：维护 SQLite 长期记忆。
+- `create_task_queue` / `update_task_step` / `get_task_queue` / `list_task_queues`：维护 SQLite 持久化多步骤任务队列。
 
 LangChain 通过 `@tool` 装饰器把普通 Python 函数包装成可被模型 tool call 的工具。`get_tools()` 返回工具列表，`agent.py` 会读取它。文件工具是在 `filesystem.py` 中定义，再由 `basic.py` 统一注册。
 
@@ -127,11 +130,19 @@ shell 命令执行工具。当前暴露 `execute_shell_command(command, cwd=".",
 
 它请求网页 HTML，跳过 `script`、`style`、`noscript`，抽取标题、正文和链接。开关是 `AGENT_ENABLE_BROWSER_TOOLS`。它不是完整浏览器自动化，不能运行 JavaScript、登录、点击动态按钮或截图。
 
+### `src/agent_project/tools/storage.py`
+
+SQLite 存储基础模块。它负责解析 `AGENT_STATE_DB_PATH`，创建 `.agent_state/agent.sqlite3`，并初始化 memories、task_queues、task_steps 三张表。
+
+### `src/agent_project/tools/memory.py`
+
+长期记忆工具模块。它提供 `remember_memory`、`search_memories`、`get_memory` 和 `delete_memory`，把用户偏好、项目事实和可复用上下文保存到 SQLite。
+
 ### `src/agent_project/tools/tasks.py`
 
-进程内多步骤任务队列工具。当前暴露 `create_task_queue`、`update_task_step`、`get_task_queue` 和 `list_task_queues`。
+SQLite 持久化多步骤任务队列工具。当前暴露 `create_task_queue`、`update_task_step`、`get_task_queue` 和 `list_task_queues`。
 
-任务步骤支持 `pending`、`in_progress`、`completed`、`blocked` 四种状态。队列保存在模块级字典里，重启程序后会丢失。
+任务步骤支持 `pending`、`in_progress`、`completed`、`blocked` 四种状态。队列保存在 SQLite 里，重启程序后仍然可以读取。
 
 ### `src/agent_project/tools/progress.py`
 

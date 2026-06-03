@@ -11,7 +11,7 @@
 - shell 命令执行，用于项目检查和自动化验证
 - 自动联网搜索，基于 DuckDuckGo HTML 搜索页
 - 轻量浏览器操作：打开网页、抽取正文、列出链接
-- 进程内多步骤任务队列，用于规划和进度跟踪
+- SQLite 长期记忆和持久化任务队列，用于跨会话保存偏好、项目事实和任务状态
 - 工具执行过程可见化：读取文件、检索网页、执行命令、更新任务时输出进度
 - 命令行交互
 - 简单可扩展的项目结构
@@ -119,9 +119,32 @@ AGENT_ENABLE_BROWSER_TOOLS=true
 - `web_search`：联网搜索并返回搜索结果标题和 URL。
 - `open_web_page`：打开网页并返回标题和可读正文。
 - `list_web_page_links`：列出网页中的链接。
-- `create_task_queue` / `update_task_step` / `get_task_queue` / `list_task_queues`：创建和维护进程内任务队列。
+- `remember_memory` / `search_memories` / `get_memory` / `delete_memory`：保存、检索、读取和删除 SQLite 长期记忆。
+- `create_task_queue` / `update_task_step` / `get_task_queue` / `list_task_queues`：创建和维护 SQLite 持久化任务队列。
 
 浏览器工具是轻量文本浏览器，不能运行 JavaScript、登录、点击动态按钮或截图；需要真实浏览器自动化时可再接 Playwright。任务队列保存在当前 Python 进程内，重启后会丢失。
+
+## SQLite 长期记忆和任务队列
+
+agent 使用 SQLite 保存长期记忆和任务队列。默认路径由 `.env` 控制：
+
+```env
+AGENT_STATE_DB_PATH=/home/qiao/work/agent_project/.agent_state/agent.sqlite3
+AGENT_MEMORY_CONTEXT_LIMIT=5
+```
+
+如果没有设置 `AGENT_STATE_DB_PATH`，默认会使用 `AGENT_WORKSPACE_ROOT/.agent_state/agent.sqlite3`；如果也没有设置 workspace，则使用当前工作目录下的 `.agent_state/agent.sqlite3`。
+
+长期记忆工具：
+
+- `remember_memory`：保存一条长期记忆，可带 namespace、source、tags。
+- `search_memories`：按关键词检索记忆；空关键词返回最近记忆。
+- `get_memory`：按 ID 读取一条记忆。
+- `delete_memory`：按 ID 删除一条记忆。
+
+任务队列工具保持原来的名字和参数，但现在写入 SQLite，重启 `agent-chat` 后仍可通过 `list_task_queues` 和 `get_task_queue` 找回。
+
+构建 agent 时会自动把最近 `AGENT_MEMORY_CONTEXT_LIMIT` 条 default namespace 记忆追加到系统提示词里；设为 `0` 可以关闭自动注入，仍然保留手动 memory tools。
 
 ## 执行过程可见化
 

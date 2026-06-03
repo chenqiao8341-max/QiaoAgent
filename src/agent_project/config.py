@@ -25,6 +25,8 @@ class Settings:
     agent_enable_web_search: bool = True
     agent_enable_browser_tools: bool = True
     agent_show_tool_progress: bool = True
+    agent_state_db_path: str | None = None
+    agent_memory_context_limit: int = 5
 
 
 def load_settings() -> Settings:
@@ -47,6 +49,8 @@ def load_settings() -> Settings:
         ),
         local_vllm_model=os.getenv("LOCAL_VLLM_MODEL", "qwen-3.6-35b-a3b"),
         agent_workspace_root=os.getenv("AGENT_WORKSPACE_ROOT"),
+        agent_state_db_path=os.getenv("AGENT_STATE_DB_PATH"),
+        agent_memory_context_limit=int(os.getenv("AGENT_MEMORY_CONTEXT_LIMIT", "5")),
         agent_enable_human_approval=os.getenv("AGENT_ENABLE_HUMAN_APPROVAL", "true")
         .strip()
         .lower()

@@ -8,6 +8,7 @@ from langgraph.prebuilt import create_react_agent
 from agent_project.config import Settings, load_settings
 from agent_project.llms import build_chat_model
 from agent_project.tools import get_tools
+from agent_project.tools.memory import recent_memory_context
 
 
 DEFAULT_SYSTEM_PROMPT = """You are a practical AI agent.
@@ -17,7 +18,9 @@ Use shell command tools when the user asks you to run commands or verify project
 Use web search and browser tools when current external information or page inspection is needed.
 For explicit search requests, call web_search before answering.
 Only say search is unavailable if the tool returns an error.
-Use task queue tools to plan and track multi-step work.
+Use memory tools to store and retrieve durable user preferences, project facts,
+and reusable context.
+Use task queue tools to plan and track multi-step work; task queues persist across sessions.
 When a tool asks for human approval, wait for the user decision and respect it.
 Keep answers concise, but explain important assumptions."""
 
@@ -44,8 +47,16 @@ def message_content_to_text(content: Any) -> str:
     return str(content)
 
 
+def _system_prompt_with_memory(system_prompt: str, settings: Settings) -> str:
+    context = recent_memory_context(limit=settings.agent_memory_context_limit)
+    if not context:
+        return system_prompt
+    return f"{system_prompt}\n\n{context}"
+
+
 def build_agent(settings: Settings | None = None, system_prompt: str = DEFAULT_SYSTEM_PROMPT):
     settings = settings or load_settings()
+    system_prompt = _system_prompt_with_memory(system_prompt, settings)
     model = build_chat_model(settings)
     tools = get_tools()
     try:
