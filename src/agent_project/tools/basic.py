@@ -7,7 +7,19 @@ import os
 
 from langchain_core.tools import tool
 
+from agent_project.tools.codex_delegate import (
+    get_codex_task,
+    list_codex_tasks,
+    rewrite_task_for_codex,
+    run_codex_task,
+)
 from agent_project.tools.filesystem import list_local_directory, read_local_file, write_local_file
+from agent_project.tools.feishu import (
+    generate_feishu_report,
+    get_feishu_report,
+    list_feishu_messages,
+    list_feishu_reports,
+)
 from agent_project.tools.memory import delete_memory, get_memory, remember_memory, search_memories
 from agent_project.tools.shell import execute_shell_command
 from agent_project.tools.web import web_search
@@ -87,6 +99,14 @@ def get_tools():
         web_search,
         open_web_page,
         list_web_page_links,
+        generate_feishu_report,
+        list_feishu_reports,
+        get_feishu_report,
+        list_feishu_messages,
+        rewrite_task_for_codex,
+        run_codex_task,
+        list_codex_tasks,
+        get_codex_task,
         remember_memory,
         search_memories,
         get_memory,

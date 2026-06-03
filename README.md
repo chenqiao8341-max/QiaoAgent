@@ -124,6 +124,46 @@ AGENT_ENABLE_BROWSER_TOOLS=true
 
 浏览器工具是轻量文本浏览器，不能运行 JavaScript、登录、点击动态按钮或截图；需要真实浏览器自动化时可再接 Playwright。任务队列保存在当前 Python 进程内，重启后会丢失。
 
+## Feishu 监视和 Codex 代理
+
+飞书监视采用事件回调模式。启动 watcher：
+
+```bash
+cd /home/qiao/work/agent_project
+.venv/bin/agent-feishu-watch --host 0.0.0.0 --port 8787
+```
+
+然后在飞书开放平台把事件回调 URL 指向这个服务，例如 `https://你的域名/` 或内网穿透后的 URL。飞书 URL verification 请求会返回 `challenge`。可选环境变量：
+
+```env
+FEISHU_WATCH_HOST=0.0.0.0
+FEISHU_WATCH_PORT=8787
+FEISHU_VERIFICATION_TOKEN=
+FEISHU_REPORT_INTERVAL_SECONDS=300
+FEISHU_REPORT_BATCH_SIZE=10
+```
+
+收到飞书消息后，watcher 会写入 SQLite，并按间隔或批量阈值生成报告。agent 内可用工具：
+
+- `list_feishu_messages`
+- `generate_feishu_report`
+- `list_feishu_reports`
+- `get_feishu_report`
+
+Codex 代理默认关闭。确认要允许 agent 唤起 Codex 后，在 `.env` 中设置：
+
+```env
+AGENT_ENABLE_CODEX_DELEGATION=true
+```
+
+可用工具：
+
+- `rewrite_task_for_codex`：把你的任务改写成更适合 Codex 执行的说明。
+- `run_codex_task`：调用 `codex exec` 执行任务，并把 stdout/stderr/status 写入 SQLite。
+- `list_codex_tasks` / `get_codex_task`：查看历史 Codex 任务。
+
+`run_codex_task` 默认使用 `codex exec -s workspace-write -a never`，工作目录默认是 `AGENT_WORKSPACE_ROOT`。
+
 ## SQLite 长期记忆和任务队列
 
 agent 使用 SQLite 保存长期记忆和任务队列。默认路径由 `.env` 控制：

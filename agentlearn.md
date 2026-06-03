@@ -492,3 +492,10 @@ def get_tools():
 - 高风险能力如何通过人工审批控制。
 - 网络类工具如何把外部信息转成模型可读文本。
 - 任务队列如何辅助 agent 做多步骤工作。
+
+
+## 12. Feishu 监视和 Codex 代理
+
+飞书能力由 `agent_project.feishu_watch` 和 `tools/feishu.py` 提供。它使用飞书事件回调模式：常驻 `agent-feishu-watch` HTTP 服务，接收消息事件，写入 SQLite 的 `feishu_messages`，再生成 `feishu_reports`。
+
+Codex 代理由 `tools/codex_delegate.py` 提供。核心流程是：先用 `rewrite_task_for_codex` 把用户任务改写成更清晰的 Codex 指令，再用 `run_codex_task` 调用本机 `codex exec`，并把任务状态和输出写入 `codex_tasks` 表。该能力默认由 `AGENT_ENABLE_CODEX_DELEGATION=false` 关闭，需要显式打开。

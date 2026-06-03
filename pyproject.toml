@@ -26,6 +26,7 @@ dev = [
 
 [project.scripts]
 agent-chat = "agent_project.cli:main"
+agent-feishu-watch = "agent_project.feishu_watch:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
