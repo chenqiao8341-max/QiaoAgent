@@ -6,12 +6,13 @@
 - OpenAI-compatible API 接入，例如 DeepSeek、Kimi、DashScope/Qwen、本地 vLLM
 - LangGraph `create_react_agent`
 - Tool calling
+- Codex-style skills：基于 `SKILL.md` 的可插拔任务知识
 - 本地文件读取、目录列表、写入
-- 写入、越权读取和 shell 命令执行时向人类申请终端确认
+- 可配置的人类审批：可对写入、越权读取和 shell 命令进行终端确认
 - shell 命令执行，用于项目检查和自动化验证
 - 自动联网搜索，基于 DuckDuckGo HTML 搜索页
 - 轻量浏览器操作：打开网页、抽取正文、列出链接
-- SQLite 长期记忆和持久化任务队列，用于跨会话保存偏好、项目事实和任务状态
+- SQLite 长期记忆、工作收件箱、工作任务和持久化任务队列，用于跨会话保存偏好、项目事实和任务状态
 - 工具执行过程可见化：读取文件、检索网页、执行命令、更新任务时输出进度
 - 命令行交互
 - 简单可扩展的项目结构
@@ -31,6 +32,9 @@ agent_project/
     tools/web.py       # 联网搜索 tool
     tools/browser.py   # 轻量浏览器 tools
     tools/tasks.py     # 多步骤任务队列 tools
+    tools/skills.py    # Codex-style skill 发现和读取 tools
+  skills/
+    work-record-manager/SKILL.md # 工作记录管理示例 skill
   examples/
     run_once.py       # 单次调用示例
 ```
@@ -111,6 +115,7 @@ LOCAL_VLLM_API_KEY=local-vllm
 AGENT_ENABLE_SHELL_COMMANDS=true
 AGENT_ENABLE_WEB_SEARCH=true
 AGENT_ENABLE_BROWSER_TOOLS=true
+AGENT_RECURSION_LIMIT=30
 ```
 
 可用工具包括：
@@ -122,7 +127,72 @@ AGENT_ENABLE_BROWSER_TOOLS=true
 - `remember_memory` / `search_memories` / `get_memory` / `delete_memory`：保存、检索、读取和删除 SQLite 长期记忆。
 - `create_task_queue` / `update_task_step` / `get_task_queue` / `list_task_queues`：创建和维护 SQLite 持久化任务队列。
 
-浏览器工具是轻量文本浏览器，不能运行 JavaScript、登录、点击动态按钮或截图；需要真实浏览器自动化时可再接 Playwright。任务队列保存在当前 Python 进程内，重启后会丢失。
+浏览器工具是轻量文本浏览器，不能运行 JavaScript、登录、点击动态按钮或截图；需要真实浏览器自动化时可再接 Playwright。任务队列保存在 SQLite 中，重启后仍可继续读取和更新。`AGENT_RECURSION_LIMIT` 用来限制一次 agent 调用中的最大推理/工具循环步数，避免异常重试长期占用 CPU。
+
+## Skills
+
+agent 支持 Codex-style skills。每个 skill 是一个目录，至少包含 `SKILL.md`：
+
+```text
+skill-name/
+  SKILL.md
+  references/   # 可选
+  scripts/      # 可选
+  assets/       # 可选
+```
+
+`SKILL.md` 需要 YAML frontmatter：
+
+```markdown
+---
+name: work-record-manager
+description: Use when the user asks to manage Qiao's work record.
+---
+
+# Work Record Manager
+...
+```
+
+启动 agent 时，系统提示只注入 skill 的 `name` 和 `description`。当用户请求匹配某个 skill 时，agent 应先调用 `read_skill` 读取正文，再按需调用 `read_skill_file` 读取 `references/` 或 `scripts/` 中的资源。
+
+相关配置：
+
+```env
+AGENT_ENABLE_SKILLS=true
+AGENT_SKILLS_DIRS=/home/qiao/work/agent_project/skills:/home/qiao/.codex/skills
+AGENT_SKILL_CATALOG_LIMIT=25
+```
+
+内置示例 `skills/work-record-manager/SKILL.md` 会指导 agent 维护 `/home/qiao/work/aaa-work.md`。
+
+## 工作收件箱和任务路由
+
+面向“半替代我工作”的主流程是：你手动粘贴飞书消息、会议纪要或临时想法，agent 先收进工作收件箱，再判断归属工作和处理路线。
+
+可用工具：
+
+- `list_work_record_items`：读取并解析 `/home/qiao/work/aaa-work.md`。
+- `capture_work_message`：保存一条手动整理的工作/飞书消息，自动匹配已有工作，生成 `self` / `codex` / `ask_user` / `defer` 路由。
+- `create_work_task`：把 inbox 消息或用户请求转成结构化工作任务。
+- `list_work_inbox` / `list_work_tasks`：查看待处理消息和任务。
+- `update_work_task`：更新任务状态。
+- `add_work_record_item`：向工作记录插入新工作。
+
+推荐输入方式：
+
+```text
+这是我整理的飞书消息：
+1. 医疗翻译服务 nginx timeout，可能需要检查4卡worker和2卡worker部署。
+2. NLU 小模型测评报告需要今天发一下。
+请收进工作收件箱，判断分别属于哪项工作，并给出处理路线。
+```
+
+路由含义：
+
+- `self`：agent 自己整理、读少量文件、更新 Markdown。
+- `codex`：代码修改、部署排查、脚本执行、测试验证，适合改写任务后交给 Codex。
+- `ask_user`：信息不足，先问你一个短问题。
+- `defer`：低优先级备忘，先存起来。
 
 ## Feishu 监视和 Codex 代理
 
@@ -277,3 +347,19 @@ OPENAI_COMPATIBLE_MODEL=qwen-plus
 ```
 
 注意模型名是 `qwen3.6-plus`，不是 `qwen-3.6-plus`。不同地域的 API Key 和 Base URL 不通用。
+
+## 安全确认机制
+
+`AGENT_ENABLE_HUMAN_APPROVAL=true` 时，涉及风险的操作会在终端请求确认：
+
+```text
+[approval required]
+Action: write local file
+Path: /path/to/file
+Reason: write operations require explicit terminal approval
+Allow this operation? Type yes to approve:
+```
+
+这里没有图形弹窗；需要在运行 `agent-chat` 的终端里输入 `yes`。其他输入会拒绝。
+
+`AGENT_ENABLE_HUMAN_APPROVAL=false` 时，`AGENT_WORKSPACE_ROOT` 内的写文件和 shell 命令会自动执行；工作区外操作会直接拒绝，不会反复询问。建议个人自用时把 `AGENT_WORKSPACE_ROOT` 设置为 `/home/qiao/work`。

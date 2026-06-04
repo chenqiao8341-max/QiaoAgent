@@ -499,3 +499,33 @@ def get_tools():
 飞书能力由 `agent_project.feishu_watch` 和 `tools/feishu.py` 提供。它使用飞书事件回调模式：常驻 `agent-feishu-watch` HTTP 服务，接收消息事件，写入 SQLite 的 `feishu_messages`，再生成 `feishu_reports`。
 
 Codex 代理由 `tools/codex_delegate.py` 提供。核心流程是：先用 `rewrite_task_for_codex` 把用户任务改写成更清晰的 Codex 指令，再用 `run_codex_task` 调用本机 `codex exec`，并把任务状态和输出写入 `codex_tasks` 表。该能力默认由 `AGENT_ENABLE_CODEX_DELEGATION=false` 关闭，需要显式打开。
+
+## 13. Codex-style Skills
+
+本项目现在支持类似 Codex 的 skill 机制。实现位于 `src/agent_project/tools/skills.py`。核心约定：
+
+- skill 是一个目录，必须包含 `SKILL.md`。
+- `SKILL.md` 顶部使用 YAML frontmatter，至少包含 `name` 和 `description`。
+- agent 启动时只把 skill catalog（名称和描述）注入系统提示，避免把所有正文塞进上下文。
+- 当用户任务匹配某个 skill 时，agent 应调用 `read_skill(name)` 读取正文。
+- 如果正文提到 `references/`、`scripts/` 或其他资源，再调用 `read_skill_file(name, relative_path)` 按需读取。
+
+默认 skill 目录由 `AGENT_SKILLS_DIRS` 配置，Linux 下多个目录用 `:` 分隔；未配置时会扫描项目内 `skills/` 和 `~/.codex/skills`。项目内置了 `skills/work-record-manager/SKILL.md`，用于维护 `/home/qiao/work/aaa-work.md` 工作记录。
+
+
+
+## 14. 权限与循环保护
+
+`AGENT_ENABLE_HUMAN_APPROVAL=false` 表示工作区内写文件和 shell 命令自动允许；工作区外仍会拒绝。`AGENT_RECURSION_LIMIT` 会传给 LangGraph 的 `recursion_limit`，用于限制一次调用中的工具循环步数，避免模型反复重试导致 CPU 长时间占用。工具被拒绝时，系统提示要求 agent 不要重复同一个工具调用，也不要声称有图形弹窗。
+
+## 15. 工作收件箱和任务路由
+
+`src/agent_project/tools/work_management.py` 提供“半替代我工作”的第一层能力：
+
+- `list_work_record_items()` 解析 `/home/qiao/work/aaa-work.md` 中的工作和项目路径。
+- `capture_work_message()` 接收手动整理的飞书消息/工作消息，写入 SQLite 的 `work_inbox_messages`，并用工作记录做关键词匹配。
+- 路由结果包括 `self`、`codex`、`ask_user`、`defer`。
+- `create_work_task()` 将消息转成 `work_tasks` 结构化任务；`list_work_tasks()` 和 `update_work_task()` 用于后续跟踪。
+
+推荐流程是：用户粘贴消息 -> agent 调用 `capture_work_message` -> 若 route 为 `codex`，先 `create_work_task`，再 `rewrite_task_for_codex` 和可选 `run_codex_task`；若 route 为 `self`，agent 自己处理并按需更新 `aaa-work.md`。
+

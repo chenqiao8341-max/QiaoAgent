@@ -66,7 +66,7 @@ def execute_shell_command(
     timeout_seconds: int = 30,
     max_chars: int = 20000,
 ) -> str:
-    """Execute a shell command after human approval and return stdout/stderr."""
+    """Execute a shell command and return stdout/stderr. Approval depends on config."""
     emit_progress(f"preparing shell command: {command}")
     if not _shell_enabled():
         emit_progress("shell command skipped: disabled by AGENT_ENABLE_SHELL_COMMANDS")
@@ -81,14 +81,19 @@ def execute_shell_command(
         return f"Working directory is not a directory: {workdir}"
 
     root = _workspace_root()
-    if _is_inside(workdir, root):
-        reason = "shell commands require explicit human approval"
+    inside_workspace = _is_inside(workdir, root)
+    if inside_workspace and not _approval_enabled():
+        reason = ""
+    elif inside_workspace:
+        reason = "shell commands require explicit terminal approval"
     else:
-        reason = f"cwd is outside AGENT_WORKSPACE_ROOT={root} and shell commands require approval"
+        reason = f"cwd is outside AGENT_WORKSPACE_ROOT={root}; terminal approval is required"
 
-    if not _ask_human_approval(command, workdir, reason):
+    if reason and not _ask_human_approval(command, workdir, reason):
         emit_progress(f"shell command denied: {command}")
-        return f"Shell command denied: {reason}"
+        if _approval_enabled():
+            return f"Shell command denied: {reason}. The user must type yes in the terminal prompt."
+        return f"Shell command denied: {reason}. AGENT_ENABLE_HUMAN_APPROVAL=false, so operations outside the workspace are not prompted."
 
     timeout = max(1, min(timeout_seconds, 120))
     emit_progress(f"running shell command in {workdir}: {command}")

@@ -97,5 +97,42 @@ def _initialize(connection: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL,
             completed_at TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS work_inbox_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL DEFAULT 'manual',
+            sender TEXT NOT NULL DEFAULT '',
+            content TEXT NOT NULL,
+            matched_work TEXT NOT NULL DEFAULT '',
+            classification TEXT NOT NULL DEFAULT '',
+            route TEXT NOT NULL DEFAULT '',
+            priority TEXT NOT NULL DEFAULT 'normal',
+            status TEXT NOT NULL DEFAULT 'new',
+            rationale TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_work_inbox_status_created
+            ON work_inbox_messages(status, created_at);
+
+        CREATE TABLE IF NOT EXISTS work_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            work_title TEXT NOT NULL DEFAULT '',
+            title TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            route TEXT NOT NULL DEFAULT 'self',
+            priority TEXT NOT NULL DEFAULT 'normal',
+            status TEXT NOT NULL DEFAULT 'pending',
+            inbox_message_id INTEGER,
+            codex_task_id INTEGER,
+            task_queue_id TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            completed_at TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_work_tasks_status_updated
+            ON work_tasks(status, updated_at);
         """
     )

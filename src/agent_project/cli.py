@@ -9,12 +9,13 @@ from agent_project.agent import build_agent, invoke_agent, message_content_to_te
 from agent_project.config import load_settings
 
 
-def _stream_agent_response(agent: Any, messages: list) -> list:
+def _stream_agent_response(agent: Any, messages: list, recursion_limit: int) -> list:
     """Stream the latest agent response and return the updated message history."""
     started_answer = False
     latest_messages = messages
     for stream_mode, chunk in agent.stream(
         {"messages": messages},
+        config={"recursion_limit": recursion_limit},
         stream_mode=["messages", "values"],
     ):
         if stream_mode == "messages":
@@ -57,7 +58,7 @@ def run_chat() -> None:
             continue
 
         messages.append(HumanMessage(content=user_text))
-        messages = _stream_agent_response(agent, messages)
+        messages = _stream_agent_response(agent, messages, settings.agent_recursion_limit)
 
 
 def main() -> None:

@@ -62,16 +62,22 @@ def _check_read_allowed(path: Path) -> tuple[bool, str]:
 
 def _check_write_allowed(path: Path) -> tuple[bool, str]:
     root = _workspace_root()
-    if _is_inside(path, root):
-        reason = "write operations require explicit human approval"
+    inside_workspace = _is_inside(path, root)
+    if inside_workspace and not _approval_enabled():
+        return True, ""
+
+    if inside_workspace:
+        reason = "write operations require explicit terminal approval"
     else:
         reason = (
-            f"path is outside AGENT_WORKSPACE_ROOT={root} and write operations require approval"
+            f"path is outside AGENT_WORKSPACE_ROOT={root}; terminal approval is required"
         )
 
     if _ask_human_approval("write local file", path, reason):
         return True, ""
-    return False, f"Write denied: {reason}"
+    if _approval_enabled():
+        return False, f"Write denied: {reason}. The user must type yes in the terminal prompt."
+    return False, f"Write denied: {reason}. AGENT_ENABLE_HUMAN_APPROVAL=false, so operations outside the workspace are not prompted."
 
 
 def _line_delta(old: str, new: str) -> tuple[int, int]:
@@ -140,7 +146,7 @@ def read_local_file(path: str, max_chars: int = 20000) -> str:
 
 @tool
 def write_local_file(path: str, content: str, mode: str = "overwrite") -> str:
-    """Write UTF-8 text to a local file after human approval. Mode: overwrite or append."""
+    """Write UTF-8 text to a local file. Workspace writes may require approval by config."""
     target = _resolve_path(path)
     emit_progress(f"preparing file write: {target} (mode={mode})")
     if mode not in {"overwrite", "append"}:

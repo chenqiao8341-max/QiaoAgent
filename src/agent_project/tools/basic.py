@@ -22,6 +22,7 @@ from agent_project.tools.feishu import (
 )
 from agent_project.tools.memory import delete_memory, get_memory, remember_memory, search_memories
 from agent_project.tools.shell import execute_shell_command
+from agent_project.tools.skills import list_skills, read_skill, read_skill_file
 from agent_project.tools.web import web_search
 from agent_project.tools.browser import list_web_page_links, open_web_page
 from agent_project.tools.tasks import (
@@ -29,6 +30,15 @@ from agent_project.tools.tasks import (
     get_task_queue,
     list_task_queues,
     update_task_step,
+)
+from agent_project.tools.work_management import (
+    add_work_record_item,
+    capture_work_message,
+    create_work_task,
+    list_work_inbox,
+    list_work_record_items,
+    list_work_tasks,
+    update_work_task,
 )
 
 
@@ -111,6 +121,16 @@ def get_tools():
         search_memories,
         get_memory,
         delete_memory,
+        list_skills,
+        read_skill,
+        read_skill_file,
+        list_work_record_items,
+        add_work_record_item,
+        capture_work_message,
+        create_work_task,
+        list_work_inbox,
+        list_work_tasks,
+        update_work_task,
         create_task_queue,
         update_task_step,
         get_task_queue,

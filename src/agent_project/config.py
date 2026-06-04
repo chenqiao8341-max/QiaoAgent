@@ -27,6 +27,10 @@ class Settings:
     agent_show_tool_progress: bool = True
     agent_state_db_path: str | None = None
     agent_memory_context_limit: int = 5
+    agent_enable_skills: bool = True
+    agent_skills_dirs: str | None = None
+    agent_skill_catalog_limit: int = 25
+    agent_recursion_limit: int = 30
 
 
 def load_settings() -> Settings:
@@ -51,6 +55,13 @@ def load_settings() -> Settings:
         agent_workspace_root=os.getenv("AGENT_WORKSPACE_ROOT"),
         agent_state_db_path=os.getenv("AGENT_STATE_DB_PATH"),
         agent_memory_context_limit=int(os.getenv("AGENT_MEMORY_CONTEXT_LIMIT", "5")),
+        agent_enable_skills=os.getenv("AGENT_ENABLE_SKILLS", "true")
+        .strip()
+        .lower()
+        in {"1", "true", "yes", "on"},
+        agent_skills_dirs=os.getenv("AGENT_SKILLS_DIRS"),
+        agent_skill_catalog_limit=int(os.getenv("AGENT_SKILL_CATALOG_LIMIT", "25")),
+        agent_recursion_limit=int(os.getenv("AGENT_RECURSION_LIMIT", "30")),
         agent_enable_human_approval=os.getenv("AGENT_ENABLE_HUMAN_APPROVAL", "true")
         .strip()
         .lower()
