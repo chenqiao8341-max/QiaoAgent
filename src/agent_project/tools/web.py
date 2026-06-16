@@ -13,6 +13,9 @@ from agent_project.tools.progress import emit_progress
 
 
 USER_AGENT = "agent-project/0.1 (+https://example.local)"
+_SEARCH_CACHE: dict[str, str] = {}
+_SEARCH_COUNT = 0
+_SEEN_SEARCH_URLS: set[str] = set()
 
 
 def _env_bool(name: str, default: bool = True) -> bool:
@@ -24,7 +27,40 @@ def _clamp_timeout(timeout_seconds: int) -> int:
     return max(1, min(timeout_seconds, 30))
 
 
-def _fetch_url(url: str, timeout_seconds: int = 10) -> tuple[str, str]:
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _normalize_query(query: str) -> str:
+    return re.sub(r"\s+", " ", query.casefold()).strip()
+
+
+def _normalize_url(url: str) -> str:
+    parsed = urlparse(url)
+    path = parsed.path.rstrip("/") or parsed.path
+    return parsed._replace(
+        scheme=parsed.scheme.lower(),
+        netloc=parsed.netloc.lower(),
+        path=path,
+        fragment="",
+    ).geturl()
+
+
+def _research_budget_note() -> str:
+    soft_limit = max(1, _env_int("AGENT_RESEARCH_SEARCH_SOFT_LIMIT", 6))
+    if _SEARCH_COUNT < soft_limit:
+        return ""
+    return (
+        f"Research note: {soft_limit}+ web searches have been run in this process. "
+        "If you already have several credible sources, stop searching and start "
+        "opening, synthesizing, or writing the requested report.\n\n"
+    )
+
+
+def _fetch_url_bytes(url: str, timeout_seconds: int = 10) -> tuple[bytes, str]:
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"}:
         raise ValueError("Only http and https URLs are supported.")
@@ -34,6 +70,11 @@ def _fetch_url(url: str, timeout_seconds: int = 10) -> tuple[str, str]:
         raw = response.read()
         content_type = response.headers.get("content-type", "")
 
+    return raw, content_type
+
+
+def _fetch_url(url: str, timeout_seconds: int = 10) -> tuple[str, str]:
+    raw, content_type = _fetch_url_bytes(url, timeout_seconds=timeout_seconds)
     encoding = "utf-8"
     match = re.search(r"charset=([^;\s]+)", content_type, flags=re.IGNORECASE)
     if match:
@@ -111,11 +152,32 @@ def _clean_duckduckgo_url(href: str) -> str:
 @tool
 def web_search(query: str, max_results: int = 5, timeout_seconds: int = 10) -> str:
     """Search the web and return result titles and URLs."""
+    global _SEARCH_COUNT
     emit_progress(f"searching web: {query}")
     if not _env_bool("AGENT_ENABLE_WEB_SEARCH", True):
         emit_progress("web search skipped: disabled by AGENT_ENABLE_WEB_SEARCH")
         return "Web search is disabled by AGENT_ENABLE_WEB_SEARCH."
 
+    normalized_query = _normalize_query(query)
+    if normalized_query in _SEARCH_CACHE:
+        emit_progress(f"web search cache hit: {query}")
+        return (
+            "Duplicate search query. Reusing cached result; prefer opening a source "
+            "or writing with the information already gathered.\n\n"
+            + _SEARCH_CACHE[normalized_query]
+        )
+
+    hard_limit = max(1, _env_int("AGENT_RESEARCH_SEARCH_HARD_LIMIT", 12))
+    if _SEARCH_COUNT >= hard_limit:
+        emit_progress(f"web search blocked by research hard limit: {query}")
+        return (
+            f"Research search budget reached ({hard_limit} unique searches in this "
+            "process). Do not run more web_search calls for this task. Open or reuse "
+            "the best sources already found, synthesize the findings, write the "
+            "requested report, or ask the user to explicitly allow more searching."
+        )
+
+    _SEARCH_COUNT += 1
     max_results = max(1, min(max_results, 10))
     url = f"https://lite.duckduckgo.com/lite/?q={quote_plus(query)}"
     try:
@@ -139,7 +201,29 @@ def web_search(query: str, max_results: int = 5, timeout_seconds: int = 10) -> s
     for title, href in results[:3]:
         emit_progress(f"search result: {title} -> {href}")
 
-    lines = [f"Search results for: {query}"]
+    new_count = 0
+    seen_count = 0
+    lines = [_research_budget_note() + f"Search results for: {query}"]
     for index, (title, href) in enumerate(results, start=1):
-        lines.append(f"{index}. {title}\n   {href}")
-    return "\n".join(lines)
+        normalized_url = _normalize_url(href)
+        if normalized_url in _SEEN_SEARCH_URLS:
+            marker = "seen"
+            seen_count += 1
+        else:
+            marker = "new"
+            new_count += 1
+            _SEEN_SEARCH_URLS.add(normalized_url)
+        lines.append(f"{index}. [{marker}] {title}\n   {href}")
+    if seen_count and not new_count:
+        lines.append(
+            "\nResearch note: this search produced no new URLs beyond earlier searches. "
+            "Use the sources already found or change strategy instead of repeating searches."
+        )
+    elif seen_count:
+        lines.append(
+            f"\nResearch note: {seen_count} result URL(s) were already seen; prioritize "
+            "the new sources or start synthesis."
+        )
+    output = "\n".join(lines)
+    _SEARCH_CACHE[normalized_query] = output
+    return output

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from langchain_core.messages import HumanMessage
+from langgraph.errors import GraphRecursionError
 
 from agent_project.agent import build_agent, invoke_agent, message_content_to_text
 from agent_project.config import load_settings
@@ -24,25 +25,36 @@ def _stream_agent_response(agent: Any, messages: list, recursion_limit: int) -> 
     """Stream the latest agent response and return the updated message history."""
     started_answer = False
     latest_messages = messages
-    for stream_mode, chunk in agent.stream(
-        {"messages": messages},
-        config={"recursion_limit": recursion_limit},
-        stream_mode=["messages", "values"],
-    ):
-        if stream_mode == "messages":
-            message_chunk, _metadata = chunk
-            if getattr(message_chunk, "type", None) != "AIMessageChunk":
-                continue
+    try:
+        for stream_mode, chunk in agent.stream(
+            {"messages": messages},
+            config={"recursion_limit": recursion_limit},
+            stream_mode=["messages", "values"],
+        ):
+            if stream_mode == "messages":
+                message_chunk, _metadata = chunk
+                if getattr(message_chunk, "type", None) != "AIMessageChunk":
+                    continue
 
-            text = message_content_to_text(message_chunk.content)
-            if text:
-                if not started_answer:
-                    print("\nAgent: ", end="", flush=True)
-                    started_answer = True
-                print(text, end="", flush=True)
+                text = message_content_to_text(message_chunk.content)
+                if text:
+                    if not started_answer:
+                        print("\nAgent: ", end="", flush=True)
+                        started_answer = True
+                    print(text, end="", flush=True)
 
-        elif stream_mode == "values":
-            latest_messages = chunk["messages"]
+            elif stream_mode == "values":
+                latest_messages = chunk["messages"]
+    except GraphRecursionError:
+        if started_answer:
+            print()
+        print(
+            "\nAgent stopped because it reached AGENT_RECURSION_LIMIT="
+            f"{recursion_limit}. The partial session was saved; run "
+            "`agent-chat resume --last` to continue, or raise AGENT_RECURSION_LIMIT "
+            "for long research tasks."
+        )
+        return latest_messages
 
     if started_answer:
         print()

@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
+import subprocess
+import tempfile
 from html import unescape
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlparse
@@ -9,7 +12,11 @@ from urllib.parse import urljoin, urlparse
 from langchain_core.tools import tool
 
 from agent_project.tools.progress import emit_progress
-from agent_project.tools.web import _fetch_url
+from agent_project.tools.web import _fetch_url, _fetch_url_bytes
+
+
+_OPENED_URL_COUNTS: dict[str, int] = {}
+_PAGE_CACHE: dict[str, str] = {}
 
 
 def _env_bool(name: str, default: bool = True) -> bool:
@@ -19,6 +26,47 @@ def _env_bool(name: str, default: bool = True) -> bool:
 
 def _normalize_space(text: str) -> str:
     return re.sub(r"\s+", " ", unescape(text)).strip()
+
+
+def _normalize_url(url: str) -> str:
+    parsed = urlparse(url)
+    scheme = parsed.scheme.lower()
+    netloc = parsed.netloc.lower()
+    path = parsed.path.rstrip("/") or parsed.path
+    return parsed._replace(scheme=scheme, netloc=netloc, path=path, fragment="").geturl()
+
+
+def _record_opened_url(url: str) -> int:
+    normalized = _normalize_url(url)
+    count = _OPENED_URL_COUNTS.get(normalized, 0) + 1
+    _OPENED_URL_COUNTS[normalized] = count
+    return count
+
+
+def _truncate_output(output: str, max_chars: int) -> str:
+    if max_chars > 0 and len(output) > max_chars:
+        return output[:max_chars] + f"\n\n[truncated after {max_chars} characters]"
+    return output
+
+
+def _pdf_text(raw: bytes, timeout_seconds: int) -> str:
+    pdftotext = shutil.which("pdftotext")
+    if not pdftotext:
+        return ""
+
+    with tempfile.NamedTemporaryFile(suffix=".pdf") as pdf_file:
+        pdf_file.write(raw)
+        pdf_file.flush()
+        completed = subprocess.run(
+            [pdftotext, "-layout", "-enc", "UTF-8", pdf_file.name, "-"],
+            text=True,
+            capture_output=True,
+            timeout=max(1, min(timeout_seconds, 30)),
+            check=False,
+        )
+    if completed.returncode != 0:
+        return ""
+    return completed.stdout.strip()
 
 
 class _PageParser(HTMLParser):
@@ -106,15 +154,59 @@ def open_web_page(url: str, max_chars: int = 20000, timeout_seconds: int = 15) -
         emit_progress("browser open skipped: disabled by AGENT_ENABLE_BROWSER_TOOLS")
         return "Browser tools are disabled by AGENT_ENABLE_BROWSER_TOOLS."
 
+    normalized_url = _normalize_url(url)
+    open_count = _record_opened_url(url)
+    repeated_note = ""
+    if open_count > 1:
+        repeated_note = (
+            f"Note: this URL has already been opened {open_count - 1} time(s) "
+            "in this process. For research tasks, prefer using the earlier "
+            "result or opening a different source unless this repeat is necessary.\n\n"
+        )
+    if normalized_url in _PAGE_CACHE:
+        emit_progress(f"web page cache hit: {url}")
+        return _truncate_output(repeated_note + _PAGE_CACHE[normalized_url], max_chars)
+
     try:
         html, content_type = _fetch_url(url, timeout_seconds=timeout_seconds)
     except Exception as exc:
         emit_progress(f"browser open failed: {exc}")
-        return f"Browser open error: {exc}"
+        output = (
+            f"Browser open error for {url}: {exc}\n\n"
+            "Research note: do not retry this exact URL in the same task. Prefer an "
+            "accessible mirror such as arXiv, INSPIRE, PDG, HFLAV, CERN CDS, or an "
+            "official collaboration page."
+        )
+        _PAGE_CACHE[normalized_url] = output
+        return _truncate_output(repeated_note + output, max_chars)
+
+    if "pdf" in content_type.lower() or url.lower().split("?", 1)[0].endswith(".pdf"):
+        try:
+            raw, _pdf_content_type = _fetch_url_bytes(url, timeout_seconds=timeout_seconds)
+            text = _pdf_text(raw, timeout_seconds=timeout_seconds)
+        except Exception as exc:
+            emit_progress(f"PDF text extraction failed: {exc}")
+            text = ""
+
+        if not text:
+            emit_progress(f"browser fetched PDF but could not extract text: {url}")
+            return (
+                repeated_note
+                + f"Fetched PDF content from {url}, but text extraction failed. "
+                "The local pdftotext command may be unavailable or the PDF may be scanned."
+            )
+
+        emit_progress(f"PDF read complete: {url} ({len(text)} text chars)")
+        output = f"URL: {url}\nContent-Type: {content_type}\n\n{text}"
+        _PAGE_CACHE[normalized_url] = output
+        return _truncate_output(repeated_note + output, max_chars)
 
     if "html" not in content_type.lower() and content_type:
         emit_progress(f"browser fetched non-HTML content: {url} ({content_type})")
-        return f"Fetched non-HTML content from {url}. Content-Type: {content_type}"
+        return (
+            repeated_note
+            + f"Fetched non-HTML content from {url}. Content-Type: {content_type}"
+        )
 
     parser = _PageParser(url)
     parser.feed(html)
@@ -126,11 +218,21 @@ def open_web_page(url: str, max_chars: int = 20000, timeout_seconds: int = 15) -
     if text:
         output = f"URL: {url}\nTitle: {title}\n\n{text}"
     else:
-        output = f"URL: {url}\nTitle: {title}\n\n(no readable text found)"
+        output = (
+            f"URL: {url}\nTitle: {title}\n\n(no readable text found)\n\n"
+            "Research note: this page did not expose readable text to the lightweight "
+            "browser. Do not spend more calls on this exact page; use an accessible "
+            "PDF, arXiv, INSPIRE metadata, PDG/HFLAV, or another readable source."
+        )
 
-    if max_chars > 0 and len(output) > max_chars:
-        return output[:max_chars] + f"\n\n[truncated after {max_chars} characters]"
-    return output
+    if 0 < len(text) < 1000:
+        output += (
+            "\n\nResearch note: this page exposed very little readable text. Treat it "
+            "as weak evidence and prefer fuller sources before citing details."
+        )
+
+    _PAGE_CACHE[normalized_url] = output
+    return _truncate_output(repeated_note + output, max_chars)
 
 
 @tool

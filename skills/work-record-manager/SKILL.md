@@ -41,6 +41,7 @@ Rules:
 
 - Use absolute paths in backticks.
 - Keep each work item scannable; avoid long essays.
+- **记录工作要求时尽可能简略**，只保留关键信息，不展开细节。
 - Preserve user-written facts unless newer project evidence clearly updates them.
 - If a project path is missing or unreadable, record that as a note instead of inventing progress.
 - When adding a new work item, insert it as its own `##` section.

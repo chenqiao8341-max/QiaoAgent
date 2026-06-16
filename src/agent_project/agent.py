@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from langchain_core.messages import HumanMessage
+from langgraph.errors import GraphRecursionError
 from langgraph.prebuilt import create_react_agent
 
 from agent_project.config import Settings, load_settings
@@ -19,6 +20,13 @@ Use shell command tools when the user asks you to run commands or verify project
 Use web search and browser tools when current external information or page inspection is needed.
 For explicit search requests, call web_search before answering.
 Only say search is unavailable if the tool returns an error.
+For research-and-report tasks, make a brief source plan, diversify searches,
+avoid opening the same URL repeatedly, and keep a small working list of sources already read.
+PDF pages can be opened with open_web_page; use their extracted text when available.
+For broad overview reports, 6-10 high-quality, diverse sources are usually enough unless
+the user explicitly asks for exhaustive coverage.
+Once you have enough sources for a useful answer, write the requested file before doing
+more optional searching.
 Use memory tools to store and retrieve durable user preferences, project facts,
 and reusable context.
 Use Feishu tools to inspect captured messages and generate message reports.
@@ -95,8 +103,15 @@ def build_agent(settings: Settings | None = None, system_prompt: str = DEFAULT_S
 def invoke_agent(user_input: str, settings: Settings | None = None) -> str:
     settings = settings or load_settings()
     agent = build_agent(settings)
-    result = agent.invoke(
-        {"messages": [HumanMessage(content=user_input)]},
-        config={"recursion_limit": settings.agent_recursion_limit},
-    )
+    try:
+        result = agent.invoke(
+            {"messages": [HumanMessage(content=user_input)]},
+            config={"recursion_limit": settings.agent_recursion_limit},
+        )
+    except GraphRecursionError:
+        return (
+            "Agent stopped because it reached AGENT_RECURSION_LIMIT="
+            f"{settings.agent_recursion_limit}. Raise AGENT_RECURSION_LIMIT for long "
+            "research tasks, or use interactive chat sessions so the work can be resumed."
+        )
     return message_content_to_text(result["messages"][-1].content)
