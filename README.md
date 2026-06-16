@@ -55,6 +55,26 @@ cp .env.example .env
 agent-chat
 ```
 
+## Session 恢复
+
+交互式 `agent-chat` 会自动把每轮对话保存到本地 JSONL session 文件，默认位置是当前工作目录下的 `.agent_state/sessions/`，索引文件是 `.agent_state/session_index.jsonl`。这和 Codex 的思路类似：保留完整本地 transcript，再通过 resume 命令恢复。
+
+常用命令：
+
+```bash
+agent-chat resume          # 从当前工作目录的历史 session 中选择
+agent-chat resume --last   # 直接恢复当前工作目录最近一次 session
+agent-chat resume --all    # 显示所有工作目录的 session
+agent-chat resume <id>     # 用 session id 或唯一前缀恢复
+agent-chat sessions        # 列出当前工作目录的 session
+```
+
+如果要把 session 存到自定义目录，可以设置：
+
+```env
+AGENT_SESSION_DIR=/home/qiao/.agent_project
+```
+
 也可以单次运行示例：
 
 ```bash
@@ -224,15 +244,22 @@ Codex 代理默认关闭。确认要允许 agent 唤起 Codex 后，在 `.env` �
 
 ```env
 AGENT_ENABLE_CODEX_DELEGATION=true
+AGENT_CODEX_COMMAND=codex-proxy-anyrouter
 ```
+
+`run_codex_task` 使用 `codex exec` 非交互执行任务，不会进入终端 TUI；如果你平时在终端使用 `codex-proxy-*`，这里应把 `AGENT_CODEX_COMMAND` 设为同一个 wrapper，或者调用工具时传入 `codex_command`。
 
 可用工具：
 
 - `rewrite_task_for_codex`：把你的任务改写成更适合 Codex 执行的说明。
-- `run_codex_task`：调用 `codex exec` 执行任务，并把 stdout/stderr/status 写入 SQLite。
+- `run_codex_task`：调用指定的 Codex 命令执行一次性 `exec` 任务，并把 stdout/stderr/status 写入 SQLite。
+- `start_codex_session`：启动一次 Codex `exec` 会话，返回 `session_id` 和输出，供 agent 判断下一步。
+- `continue_codex_session`：用指定 `session_id` 继续同一个 Codex 会话，agent 每轮读取返回后再决定是否继续或结束。
 - `list_codex_tasks` / `get_codex_task`：查看历史 Codex 任务。
+- `test_codex_connectivity`：扫描 `PATH` 中的 `codex` 和 `codex-proxy-*`，分别发送 `你好`，30 秒内成功返回且 exit code 为 0 的配置会进入可用名单。
 
-`run_codex_task` 默认使用 `codex exec -s workspace-write -a never`，工作目录默认是 `AGENT_WORKSPACE_ROOT`。
+`run_codex_task` 默认使用 `AGENT_CODEX_COMMAND` 指定的命令执行 `exec -s workspace-write --color never`，工作目录默认是 `AGENT_WORKSPACE_ROOT`。当前 Codex CLI 不再支持旧的 `exec -a/--approval-policy` 参数，工具会保留 `approval_policy` 入参但不传给 `exec`。
+`test_codex_connectivity` 默认使用 `codex exec -s read-only --color never`，不会写入任务数据库。
 
 ## SQLite 长期记忆和任务队列
 

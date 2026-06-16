@@ -8,11 +8,14 @@ import os
 from langchain_core.tools import tool
 
 from agent_project.tools.codex_delegate import (
+    continue_codex_session,
     get_codex_task,
     list_codex_tasks,
     rewrite_task_for_codex,
+    start_codex_session,
     run_codex_task,
 )
+from agent_project.tools.codex_connectivity import test_codex_connectivity
 from agent_project.tools.filesystem import list_local_directory, read_local_file, write_local_file
 from agent_project.tools.feishu import (
     generate_feishu_report,
@@ -114,9 +117,12 @@ def get_tools():
         get_feishu_report,
         list_feishu_messages,
         rewrite_task_for_codex,
+        start_codex_session,
+        continue_codex_session,
         run_codex_task,
         list_codex_tasks,
         get_codex_task,
+        test_codex_connectivity,
         remember_memory,
         search_memories,
         get_memory,
