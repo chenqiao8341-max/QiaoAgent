@@ -251,6 +251,42 @@ def _run_codex_subprocess(
         return "timeout", None, _coerce_text(exc.stdout), _coerce_text(exc.stderr)
 
 
+def _log_codex_session_interaction(
+    *,
+    action: str,
+    session_id: str,
+    command_name: str,
+    cwd: Path,
+    prompt: str,
+    status: str,
+    exit_code: int | None,
+    stdout: str,
+    stderr: str,
+) -> None:
+    with connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO codex_session_interactions(
+                action, codex_session_id, command_name, cwd, prompt, status,
+                exit_code, stdout, stderr, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                action,
+                session_id,
+                command_name,
+                str(cwd),
+                prompt,
+                status,
+                exit_code,
+                stdout,
+                stderr,
+                _now(),
+            ),
+        )
+
+
 def _format_codex_session_result(
     *,
     action: str,
@@ -320,6 +356,17 @@ def start_codex_session(
     emit_progress(f"starting Codex session via {command_name}: {prompt[:80]}")
     status, exit_code, stdout, stderr = _run_codex_subprocess(command, workdir, timeout)
     session_id = _extract_session_id(stderr, stdout)
+    _log_codex_session_interaction(
+        action="session_start",
+        session_id=session_id,
+        command_name=command_name,
+        cwd=workdir,
+        prompt=prompt,
+        status=status,
+        exit_code=exit_code,
+        stdout=stdout,
+        stderr=stderr,
+    )
     emit_progress(
         f"Codex session start finished status={status} "
         f"session_id={session_id or 'unknown'}"
@@ -373,6 +420,17 @@ def continue_codex_session(
     emit_progress(f"continuing Codex session {session_id} via {command_name}: {prompt[:80]}")
     status, exit_code, stdout, stderr = _run_codex_subprocess(command, workdir, timeout)
     returned_session_id = _extract_session_id(stderr, stdout) or session_id
+    _log_codex_session_interaction(
+        action="session_continue",
+        session_id=returned_session_id,
+        command_name=command_name,
+        cwd=workdir,
+        prompt=prompt,
+        status=status,
+        exit_code=exit_code,
+        stdout=stdout,
+        stderr=stderr,
+    )
     emit_progress(
         f"Codex session continue finished status={status} session_id={returned_session_id}"
     )

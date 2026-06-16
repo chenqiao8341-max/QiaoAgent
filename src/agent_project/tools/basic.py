@@ -16,6 +16,12 @@ from agent_project.tools.codex_delegate import (
     run_codex_task,
 )
 from agent_project.tools.codex_connectivity import test_codex_connectivity
+from agent_project.tools.codex_judge import (
+    create_codex_review_packet,
+    list_codex_review_packets,
+    record_task_difficulty_judgment,
+    start_codex_review,
+)
 from agent_project.tools.filesystem import list_local_directory, read_local_file, write_local_file
 from agent_project.tools.feishu import (
     generate_feishu_report,
@@ -123,6 +129,10 @@ def get_tools():
         list_codex_tasks,
         get_codex_task,
         test_codex_connectivity,
+        record_task_difficulty_judgment,
+        create_codex_review_packet,
+        start_codex_review,
+        list_codex_review_packets,
         remember_memory,
         search_memories,
         get_memory,

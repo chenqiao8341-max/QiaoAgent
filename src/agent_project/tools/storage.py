@@ -98,6 +98,48 @@ def _initialize(connection: sqlite3.Connection) -> None:
             completed_at TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS task_difficulty_judgments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task TEXT NOT NULL,
+            difficulty TEXT NOT NULL,
+            confidence REAL,
+            rationale TEXT NOT NULL DEFAULT '',
+            planned_attempt TEXT NOT NULL DEFAULT '',
+            should_request_codex_review INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS codex_review_packets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            original_task TEXT NOT NULL,
+            packet_path TEXT NOT NULL,
+            cwd TEXT NOT NULL DEFAULT '',
+            difficulty_judgment TEXT NOT NULL DEFAULT '',
+            attempt_summary TEXT NOT NULL DEFAULT '',
+            source_urls TEXT NOT NULL DEFAULT '',
+            result_paths TEXT NOT NULL DEFAULT '',
+            excerpt_paths TEXT NOT NULL DEFAULT '',
+            questions_for_codex TEXT NOT NULL DEFAULT '',
+            codex_session_id TEXT NOT NULL DEFAULT '',
+            codex_status TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            reviewed_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS codex_session_interactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            action TEXT NOT NULL,
+            codex_session_id TEXT NOT NULL DEFAULT '',
+            command_name TEXT NOT NULL DEFAULT '',
+            cwd TEXT NOT NULL DEFAULT '',
+            prompt TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT '',
+            exit_code INTEGER,
+            stdout TEXT NOT NULL DEFAULT '',
+            stderr TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS work_inbox_messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             source TEXT NOT NULL DEFAULT 'manual',

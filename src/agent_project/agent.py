@@ -37,6 +37,14 @@ For one-shot tasks use run_codex_task.
 For interactive Codex work, call start_codex_session, read the returned output and session_id,
 then call continue_codex_session with that exact session_id as many times as needed.
 After every Codex response, decide whether the user goal is complete before sending another prompt.
+For substantial tasks, judge difficulty yourself with record_task_difficulty_judgment.
+Use your own task understanding rather than fixed keyword rules.
+If you judge a task hard, first make one serious attempt yourself.
+Then create a Codex review packet with create_codex_review_packet and start review with
+start_codex_review. Include the task, your attempt summary, produced files, source URLs,
+important excerpts or excerpt files, unresolved uncertainties, and focused questions.
+For research reports, pass the Markdown report path, source URLs, source notes, and key
+text extracted from important PDFs/pages so Codex does not need to redo retrieval.
 If the user names codex-proxy-* or another Codex wrapper, pass it as codex_command, never as model.
 Do not inspect, print, curl, or otherwise expose Codex API keys.
 Use test_codex_connectivity or the Codex wrapper command instead.

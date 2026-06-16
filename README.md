@@ -255,11 +255,25 @@ AGENT_CODEX_COMMAND=codex-proxy-anyrouter
 - `run_codex_task`：调用指定的 Codex 命令执行一次性 `exec` 任务，并把 stdout/stderr/status 写入 SQLite。
 - `start_codex_session`：启动一次 Codex `exec` 会话，返回 `session_id` 和输出，供 agent 判断下一步。
 - `continue_codex_session`：用指定 `session_id` 继续同一个 Codex 会话，agent 每轮读取返回后再决定是否继续或结束。
+- `record_task_difficulty_judgment`：让 agent 记录自己对任务难度的判断。
+- `create_codex_review_packet`：把困难任务的一轮尝试、产物、来源 URL、关键摘录和待审问题打包成 Markdown。
+- `start_codex_review`：把 review packet 发送给 Codex，开启独立审查 session。
+- `list_codex_review_packets`：查看已生成的 Codex 审查包。
 - `list_codex_tasks` / `get_codex_task`：查看历史 Codex 任务。
 - `test_codex_connectivity`：扫描 `PATH` 中的 `codex` 和 `codex-proxy-*`，分别发送 `你好`，30 秒内成功返回且 exit code 为 0 的配置会进入可用名单。
 
 `run_codex_task` 默认使用 `AGENT_CODEX_COMMAND` 指定的命令执行 `exec -s workspace-write --color never`，工作目录默认是 `AGENT_WORKSPACE_ROOT`。当前 Codex CLI 不再支持旧的 `exec -a/--approval-policy` 参数，工具会保留 `approval_policy` 入参但不传给 `exec`。
 `test_codex_connectivity` 默认使用 `codex exec -s read-only --color never`，不会写入任务数据库。
+
+困难任务审查流程采用 evaluator-optimizer / handoff 思路，但不对“困难”做固定关键词规则：agent 先用 `record_task_difficulty_judgment` 记录自己的判断；若判断为困难，仍先自行完成一轮认真尝试，再调用 `create_codex_review_packet` 打包材料，最后用 `start_codex_review` 交给 Codex 审查。调研综述类任务应把报告 Markdown 路径、来源 URL、来源说明、重要 PDF/网页摘录或摘录文件放入 packet，减少 Codex 重新联网检索的成本。
+
+查看 agent 与 Codex 的真实交互：
+
+```bash
+python scripts/show_codex_interactions.py --latest
+python scripts/show_codex_interactions.py --list-tasks --limit 10
+python scripts/show_codex_interactions.py --list-session-interactions --limit 10
+```
 
 ## SQLite 长期记忆和任务队列
 

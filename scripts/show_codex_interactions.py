@@ -30,7 +30,15 @@ def _redact(text: str) -> str:
     ]
     redacted = text
     for pattern in patterns:
-        redacted = re.sub(pattern, lambda m: m.group(1) + "***REDACTED***" if m.groups() else "***REDACTED***", redacted)
+        redacted = re.sub(
+            pattern,
+            lambda match: (
+                match.group(1) + "***REDACTED***"
+                if match.groups()
+                else "***REDACTED***"
+            ),
+            redacted,
+        )
     return redacted
 
 
@@ -64,7 +72,11 @@ def _resolve_session(selector: str, latest: bool) -> Path:
     if latest:
         if not records:
             raise SystemExit("No saved sessions found.")
-        record = sorted(records.values(), key=lambda item: item.get("updated_at", ""), reverse=True)[0]
+        record = sorted(
+            records.values(),
+            key=lambda item: item.get("updated_at", ""),
+            reverse=True,
+        )[0]
         return Path(record["path"])
     if not selector:
         raise SystemExit("Provide a session id/prefix, path, or --latest.")
@@ -116,7 +128,11 @@ def show_session(session_path: Path, max_chars: int) -> None:
     for index, message in enumerate(messages, start=1):
         data = message.get("data", {})
         if message.get("type") == "ai":
-            calls = data.get("tool_calls") or data.get("additional_kwargs", {}).get("tool_calls") or []
+            calls = (
+                data.get("tool_calls")
+                or data.get("additional_kwargs", {}).get("tool_calls")
+                or []
+            )
             for call in calls:
                 name = _tool_call_name(call)
                 if name not in CODEX_TOOL_NAMES:
@@ -166,18 +182,55 @@ def list_codex_tasks(limit: int) -> None:
         print(f"{row['id']} [{row['status']}] {row['created_at']} {row['task']}")
 
 
+def list_session_interactions(limit: int) -> None:
+    db_path = _state_dir() / "agent.sqlite3"
+    if not db_path.exists():
+        print(f"State DB not found: {db_path}")
+        return
+    connection = sqlite3.connect(db_path)
+    connection.row_factory = sqlite3.Row
+    try:
+        rows = connection.execute(
+            """
+            SELECT id, action, codex_session_id, command_name, status, created_at,
+                   substr(prompt, 1, 140) prompt
+            FROM codex_session_interactions
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (max(1, min(limit, 100)),),
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        print(f"Could not read codex_session_interactions: {exc}")
+        return
+    for row in rows:
+        print(
+            f"{row['id']} [{row['status']}] {row['action']} "
+            f"session={row['codex_session_id'] or '-'} command={row['command_name']} "
+            f"{row['created_at']} {row['prompt']}"
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Inspect agent <-> Codex interactions.")
     parser.add_argument("session", nargs="?", help="Session id/prefix or session JSONL path.")
     parser.add_argument("--latest", action="store_true", help="Use the latest saved agent session.")
     parser.add_argument("--task-id", type=int, help="Show one run_codex_task SQLite record.")
     parser.add_argument("--list-tasks", action="store_true", help="List run_codex_task records.")
+    parser.add_argument(
+        "--list-session-interactions",
+        action="store_true",
+        help="List start_codex_session/continue_codex_session records.",
+    )
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--max-chars", type=int, default=20000)
     args = parser.parse_args()
 
     if args.list_tasks:
         list_codex_tasks(args.limit)
+        return
+    if args.list_session_interactions:
+        list_session_interactions(args.limit)
         return
     if args.task_id is not None:
         show_codex_task(args.task_id, max_chars=args.max_chars)
