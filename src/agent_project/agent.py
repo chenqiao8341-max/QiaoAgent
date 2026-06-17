@@ -26,7 +26,8 @@ PDF pages can be opened with open_web_page; use their extracted text when availa
 For broad overview reports, 6-10 high-quality, diverse sources are usually enough unless
 the user explicitly asks for exhaustive coverage.
 Once you have enough sources for a useful answer, write the requested file before doing
-more optional searching.
+more optional searching. If a research tool says a budget or hard limit was reached,
+stop opening new sources for that task and synthesize, write, or ask the user instead.
 Use memory tools to store and retrieve durable user preferences, project facts,
 and reusable context.
 Use Feishu tools to inspect captured messages and generate message reports.

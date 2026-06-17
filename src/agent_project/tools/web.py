@@ -10,11 +10,15 @@ from urllib.request import Request, urlopen
 from langchain_core.tools import tool
 
 from agent_project.tools.progress import emit_progress
+from agent_project.tools.research_budget import (
+    normalize_url,
+    search_budget_note,
+    try_consume_search,
+)
 
 
 USER_AGENT = "agent-project/0.1 (+https://example.local)"
 _SEARCH_CACHE: dict[str, str] = {}
-_SEARCH_COUNT = 0
 _SEEN_SEARCH_URLS: set[str] = set()
 
 
@@ -36,28 +40,6 @@ def _env_int(name: str, default: int) -> int:
 
 def _normalize_query(query: str) -> str:
     return re.sub(r"\s+", " ", query.casefold()).strip()
-
-
-def _normalize_url(url: str) -> str:
-    parsed = urlparse(url)
-    path = parsed.path.rstrip("/") or parsed.path
-    return parsed._replace(
-        scheme=parsed.scheme.lower(),
-        netloc=parsed.netloc.lower(),
-        path=path,
-        fragment="",
-    ).geturl()
-
-
-def _research_budget_note() -> str:
-    soft_limit = max(1, _env_int("AGENT_RESEARCH_SEARCH_SOFT_LIMIT", 6))
-    if _SEARCH_COUNT < soft_limit:
-        return ""
-    return (
-        f"Research note: {soft_limit}+ web searches have been run in this process. "
-        "If you already have several credible sources, stop searching and start "
-        "opening, synthesizing, or writing the requested report.\n\n"
-    )
 
 
 def _fetch_url_bytes(url: str, timeout_seconds: int = 10) -> tuple[bytes, str]:
@@ -152,7 +134,6 @@ def _clean_duckduckgo_url(href: str) -> str:
 @tool
 def web_search(query: str, max_results: int = 5, timeout_seconds: int = 10) -> str:
     """Search the web and return result titles and URLs."""
-    global _SEARCH_COUNT
     emit_progress(f"searching web: {query}")
     if not _env_bool("AGENT_ENABLE_WEB_SEARCH", True):
         emit_progress("web search skipped: disabled by AGENT_ENABLE_WEB_SEARCH")
@@ -167,17 +148,11 @@ def web_search(query: str, max_results: int = 5, timeout_seconds: int = 10) -> s
             + _SEARCH_CACHE[normalized_query]
         )
 
-    hard_limit = max(1, _env_int("AGENT_RESEARCH_SEARCH_HARD_LIMIT", 12))
-    if _SEARCH_COUNT >= hard_limit:
+    allowed, budget_message = try_consume_search(query)
+    if not allowed:
         emit_progress(f"web search blocked by research hard limit: {query}")
-        return (
-            f"Research search budget reached ({hard_limit} unique searches in this "
-            "process). Do not run more web_search calls for this task. Open or reuse "
-            "the best sources already found, synthesize the findings, write the "
-            "requested report, or ask the user to explicitly allow more searching."
-        )
+        return budget_message
 
-    _SEARCH_COUNT += 1
     max_results = max(1, min(max_results, 10))
     url = f"https://lite.duckduckgo.com/lite/?q={quote_plus(query)}"
     try:
@@ -203,9 +178,9 @@ def web_search(query: str, max_results: int = 5, timeout_seconds: int = 10) -> s
 
     new_count = 0
     seen_count = 0
-    lines = [_research_budget_note() + f"Search results for: {query}"]
+    lines = [search_budget_note() + f"Search results for: {query}"]
     for index, (title, href) in enumerate(results, start=1):
-        normalized_url = _normalize_url(href)
+        normalized_url = normalize_url(href)
         if normalized_url in _SEEN_SEARCH_URLS:
             marker = "seen"
             seen_count += 1

@@ -12,6 +12,7 @@ from urllib.parse import urljoin, urlparse
 from langchain_core.tools import tool
 
 from agent_project.tools.progress import emit_progress
+from agent_project.tools.research_budget import normalize_url, try_consume_page_open
 from agent_project.tools.web import _fetch_url, _fetch_url_bytes
 
 
@@ -28,16 +29,8 @@ def _normalize_space(text: str) -> str:
     return re.sub(r"\s+", " ", unescape(text)).strip()
 
 
-def _normalize_url(url: str) -> str:
-    parsed = urlparse(url)
-    scheme = parsed.scheme.lower()
-    netloc = parsed.netloc.lower()
-    path = parsed.path.rstrip("/") or parsed.path
-    return parsed._replace(scheme=scheme, netloc=netloc, path=path, fragment="").geturl()
-
-
 def _record_opened_url(url: str) -> int:
-    normalized = _normalize_url(url)
+    normalized = normalize_url(url)
     count = _OPENED_URL_COUNTS.get(normalized, 0) + 1
     _OPENED_URL_COUNTS[normalized] = count
     return count
@@ -154,7 +147,7 @@ def open_web_page(url: str, max_chars: int = 20000, timeout_seconds: int = 15) -
         emit_progress("browser open skipped: disabled by AGENT_ENABLE_BROWSER_TOOLS")
         return "Browser tools are disabled by AGENT_ENABLE_BROWSER_TOOLS."
 
-    normalized_url = _normalize_url(url)
+    normalized_url = normalize_url(url)
     open_count = _record_opened_url(url)
     repeated_note = ""
     if open_count > 1:
@@ -166,6 +159,11 @@ def open_web_page(url: str, max_chars: int = 20000, timeout_seconds: int = 15) -
     if normalized_url in _PAGE_CACHE:
         emit_progress(f"web page cache hit: {url}")
         return _truncate_output(repeated_note + _PAGE_CACHE[normalized_url], max_chars)
+
+    allowed, budget_message = try_consume_page_open(url)
+    if not allowed:
+        emit_progress(f"browser open blocked by research hard limit: {url}")
+        return repeated_note + budget_message
 
     try:
         html, content_type = _fetch_url(url, timeout_seconds=timeout_seconds)
@@ -242,6 +240,13 @@ def list_web_page_links(url: str, max_links: int = 30, timeout_seconds: int = 15
     if not _env_bool("AGENT_ENABLE_BROWSER_TOOLS", True):
         emit_progress("link listing skipped: disabled by AGENT_ENABLE_BROWSER_TOOLS")
         return "Browser tools are disabled by AGENT_ENABLE_BROWSER_TOOLS."
+
+    normalized_url = normalize_url(url)
+    if normalized_url not in _PAGE_CACHE:
+        allowed, budget_message = try_consume_page_open(url)
+        if not allowed:
+            emit_progress(f"link listing blocked by research hard limit: {url}")
+            return budget_message
 
     try:
         html, _content_type = _fetch_url(url, timeout_seconds=timeout_seconds)

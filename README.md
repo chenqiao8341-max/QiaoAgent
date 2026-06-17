@@ -144,6 +144,9 @@ AGENT_RECURSION_LIMIT=30
 - `web_search`：联网搜索并返回搜索结果标题和 URL。
 - `open_web_page`：打开网页并返回标题和可读正文。
 - `list_web_page_links`：列出网页中的链接。
+
+调研工具有进程内预算：`AGENT_RESEARCH_SEARCH_HARD_LIMIT` 限制唯一搜索次数，`AGENT_RESEARCH_PAGE_HARD_LIMIT` 限制新网页读取次数，`AGENT_RESEARCH_ARXIV_ABS_HARD_LIMIT` 限制不同 arXiv 文章页读取次数，防止按编号逐篇枚举。达到硬限制后，工具会要求 agent 停止新检索并开始综合、写作或请求用户授权。
+
 - `remember_memory` / `search_memories` / `get_memory` / `delete_memory`：保存、检索、读取和删除 SQLite 长期记忆。
 - `create_task_queue` / `update_task_step` / `get_task_queue` / `list_task_queues`：创建和维护 SQLite 持久化任务队列。
 
