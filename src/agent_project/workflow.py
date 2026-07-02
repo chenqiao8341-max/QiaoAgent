@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
+import re
 from typing import Any, Literal, TypedDict
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import create_react_agent
 
@@ -69,12 +71,12 @@ def build_workflow_agent(settings: Settings, system_prompt: str):
     executor = _build_react_executor(model, tools, f"{system_prompt}\n\n{EXECUTOR_PROMPT}")
 
     graph = StateGraph(AgentState)
-    graph.add_node("router", _router_node)
-    graph.add_node("planner", _planner_node)
+    graph.add_node("router", _router_node(model))
+    graph.add_node("planner", _planner_node(model))
     graph.add_node("executor", _executor_node(executor, settings))
-    graph.add_node("verifier", _verifier_node)
-    graph.add_node("reflector", _reflector_node)
-    graph.add_node("finalizer", _finalizer_node)
+    graph.add_node("verifier", _verifier_node(model))
+    graph.add_node("reflector", _reflector_node(model))
+    graph.add_node("finalizer", _finalizer_node(model))
 
     graph.set_entry_point("router")
     graph.add_edge("router", "planner")
@@ -107,48 +109,127 @@ def _build_react_executor(model: Any, tools: list[Any], prompt: str):
         return create_react_agent(model, tools, state_modifier=prompt)
 
 
-def _router_node(state: AgentState) -> AgentState:
-    user_input = _state_user_input(state)
-    task_type = classify_task_type(user_input)
-    route, risk, difficulty = classify_route_risk_difficulty(user_input, task_type)
-    return {
-        **state,
-        "user_input": user_input,
-        "task_type": task_type,
-        "route": route,
-        "risk": risk,
-        "difficulty": difficulty,
-        "status": "running",
-        "trace_events": _append_event(
-            state,
-            TraceEvent(
-                event_type="router",
-                content=f"task_type={task_type} route={route} risk={risk} difficulty={difficulty}",
-                ok=True,
+def _router_node(model: Any):
+    def run(state: AgentState) -> AgentState:
+        user_input = _state_user_input(state)
+        fallback_task_type = classify_task_type(user_input)
+        fallback_route, fallback_risk, fallback_difficulty = classify_route_risk_difficulty(
+            user_input,
+            fallback_task_type,
+        )
+        payload = _invoke_json_node(
+            model=model,
+            system_prompt=ROUTER_PROMPT
+            + """
+Return only JSON:
+{
+  "task_type": "chat|work_message|code_task|research|file_task|rag_qa",
+  "route": "self|codex|ask_user|defer",
+  "risk": "low|medium|high",
+  "difficulty": "low|high",
+  "rationale": "short reason"
+}
+Use ask_user for high-risk or underspecified requests. Use codex for complex code/deploy/test work.
+""",
+            user_prompt=f"Classify this request:\n{user_input}",
+            fallback={
+                "task_type": fallback_task_type,
+                "route": fallback_route,
+                "risk": fallback_risk,
+                "difficulty": fallback_difficulty,
+                "rationale": "deterministic fallback",
+            },
+        )
+        task_type = _coerce_literal(
+            payload.get("task_type"),
+            {"chat", "work_message", "code_task", "research", "file_task", "rag_qa"},
+            fallback_task_type,
+        )
+        route = _coerce_literal(
+            payload.get("route"),
+            {"self", "codex", "ask_user", "defer"},
+            fallback_route,
+        )
+        risk = _coerce_literal(payload.get("risk"), {"low", "medium", "high"}, fallback_risk)
+        difficulty = _coerce_literal(payload.get("difficulty"), {"low", "high"}, fallback_difficulty)
+        return {
+            **state,
+            "user_input": user_input,
+            "task_type": task_type,
+            "route": route,
+            "risk": risk,
+            "difficulty": difficulty,
+            "status": "running",
+            "trace_events": _append_event(
+                state,
+                TraceEvent(
+                    event_type="router",
+                    content=(
+                        f"task_type={task_type} route={route} risk={risk} "
+                        f"difficulty={difficulty}; {payload.get('rationale', '')}"
+                    ),
+                    ok=True,
+                ),
             ),
-        ),
-    }
+        }
+
+    return run
 
 
-def _planner_node(state: AgentState) -> AgentState:
-    plan = build_plan(
-        user_input=state.get("user_input", ""),
-        task_type=state.get("task_type", "chat"),
-        route=state.get("route", "self"),
-        risk=state.get("risk", "low"),
-        difficulty=state.get("difficulty", "low"),
-    )
-    status: WorkflowStatus = "need_user" if state.get("risk") == "high" else "running"
-    return {
-        **state,
-        "plan": plan,
-        "current_step": 0,
-        "status": status,
-        "trace_events": _append_event(
-            state,
-            TraceEvent(event_type="planner", content=_format_plan(plan), ok=True),
-        ),
-    }
+def _planner_node(model: Any):
+    def run(state: AgentState) -> AgentState:
+        fallback_plan = build_plan(
+            user_input=state.get("user_input", ""),
+            task_type=state.get("task_type", "chat"),
+            route=state.get("route", "self"),
+            risk=state.get("risk", "low"),
+            difficulty=state.get("difficulty", "low"),
+        )
+        payload = _invoke_json_node(
+            model=model,
+            system_prompt=PLANNER_PROMPT
+            + """
+Return only JSON:
+{
+  "status": "running|need_user",
+  "plan": [
+    {"step": 1, "action": "route_work|retrieve_context|execute|delegate|verify|ask_user", "description": "..."}
+  ],
+  "rationale": "short reason"
+}
+Rules:
+- Use at most five steps.
+- For high risk, status must be need_user and plan must ask for confirmation.
+- For "belongs to which project" or work-record matching, include search_work_record_vectors or capture_work_message in the plan description.
+- For route=codex, include create_work_task and rewrite_task_for_codex before delegation.
+""",
+            user_prompt=_planner_user_prompt(state, fallback_plan),
+            fallback={"status": "need_user" if state.get("risk") == "high" else "running", "plan": fallback_plan},
+        )
+        plan = _coerce_plan(payload.get("plan"), fallback_plan)
+        status: WorkflowStatus = _coerce_literal(
+            payload.get("status"),
+            {"running", "need_user"},
+            "need_user" if state.get("risk") == "high" else "running",
+        )
+        if state.get("risk") == "high":
+            status = "need_user"
+        return {
+            **state,
+            "plan": plan,
+            "current_step": 0,
+            "status": status,
+            "trace_events": _append_event(
+                state,
+                TraceEvent(
+                    event_type="planner",
+                    content=f"{_format_plan(plan)}\nrationale: {payload.get('rationale', '')}",
+                    ok=True,
+                ),
+            ),
+        }
+
+    return run
 
 
 def _executor_node(executor: Any, settings: Settings):
@@ -195,62 +276,128 @@ def _executor_node(executor: Any, settings: Settings):
     return run
 
 
-def _verifier_node(state: AgentState) -> AgentState:
-    if state.get("status") == "failed":
-        ok = False
-        status: WorkflowStatus = "failed"
-        content = f"execution failed: {state.get('error_type', 'unknown_error')}"
-    elif state.get("final_answer", "").strip():
-        ok = True
-        status = "done"
-        content = "final answer present"
-    else:
-        ok = False
-        status = "failed"
-        content = "executor returned no final answer"
-    return {
-        **state,
-        "status": status,
-        "trace_events": _append_event(
-            state,
-            TraceEvent(event_type="verifier", content=content, ok=ok),
-        ),
-    }
-
-
-def _reflector_node(state: AgentState) -> AgentState:
-    reflection = (
-        f"Workflow failed for task_type={state.get('task_type', '')}; "
-        f"error_type={state.get('error_type', '') or 'missing_final_answer'}."
-    )
-    return {
-        **state,
-        "reflections": [*state.get("reflections", []), reflection],
-        "trace_events": _append_event(
-            state,
-            TraceEvent(event_type="reflector", content=reflection, ok=False),
-        ),
-    }
-
-
-def _finalizer_node(state: AgentState) -> AgentState:
-    if state.get("status") == "need_user":
-        answer = _confirmation_answer(state)
-    elif state.get("status") == "failed":
-        answer = state.get("final_answer") or (
-            "Workflow failed before completing the task. "
-            f"error_type: {state.get('error_type', '') or 'unknown'}"
+def _verifier_node(model: Any):
+    def run(state: AgentState) -> AgentState:
+        fallback_ok = state.get("status") != "failed" and bool(state.get("final_answer", "").strip())
+        fallback_status: WorkflowStatus = "done" if fallback_ok else "failed"
+        fallback_reason = (
+            "final answer present"
+            if fallback_ok
+            else f"execution failed: {state.get('error_type', '') or 'missing_final_answer'}"
         )
-    else:
-        answer = state.get("final_answer", "")
-    return {
-        **state,
-        "final_answer": answer,
-        "trace_events": _append_event(
-            state,
-            TraceEvent(event_type="finalizer", content=answer, ok=state.get("status") != "failed"),
-        ),
-    }
+        payload = _invoke_json_node(
+            model=model,
+            system_prompt=VERIFIER_PROMPT
+            + """
+Return only JSON:
+{
+  "status": "done|failed|need_user",
+  "ok": true,
+  "reason": "short verification reason",
+  "missing": ["optional missing item"]
+}
+Check whether the answer satisfies the plan and whether user input is required.
+""",
+            user_prompt=_verifier_user_prompt(state),
+            fallback={"status": fallback_status, "ok": fallback_ok, "reason": fallback_reason},
+        )
+        status: WorkflowStatus = _coerce_literal(
+            payload.get("status"),
+            {"done", "failed", "need_user"},
+            fallback_status,
+        )
+        ok = bool(payload.get("ok", status == "done"))
+        if state.get("status") == "failed":
+            status = "failed"
+            ok = False
+        return {
+            **state,
+            "status": status,
+            "trace_events": _append_event(
+                state,
+                TraceEvent(
+                    event_type="verifier",
+                    content=str(payload.get("reason", fallback_reason)),
+                    ok=ok,
+                ),
+            ),
+        }
+
+    return run
+
+
+def _reflector_node(model: Any):
+    def run(state: AgentState) -> AgentState:
+        fallback_reflection = (
+            f"Workflow failed for task_type={state.get('task_type', '')}; "
+            f"error_type={state.get('error_type', '') or 'missing_final_answer'}."
+        )
+        payload = _invoke_json_node(
+            model=model,
+            system_prompt=REFLECTOR_PROMPT
+            + """
+Return only JSON:
+{
+  "reflection": "one actionable lesson for future similar tasks",
+  "failure_type": "wrong_tool|bad_tool_args|missing_context|hallucinated_fact|unsafe_action|over_delegation|under_delegation|rag_miss|planning_loop|unknown"
+}
+""",
+            user_prompt=_reflection_user_prompt(state),
+            fallback={"reflection": fallback_reflection, "failure_type": "unknown"},
+        )
+        reflection = str(payload.get("reflection") or fallback_reflection)
+        return {
+            **state,
+            "reflections": [*state.get("reflections", []), reflection],
+            "trace_events": _append_event(
+                state,
+                TraceEvent(
+                    event_type="reflector",
+                    content=f"{payload.get('failure_type', 'unknown')}: {reflection}",
+                    ok=False,
+                ),
+            ),
+        }
+
+    return run
+
+
+def _finalizer_node(model: Any):
+    def run(state: AgentState) -> AgentState:
+        if state.get("status") == "need_user":
+            fallback_answer = _confirmation_answer(state)
+        elif state.get("status") == "failed":
+            fallback_answer = state.get("final_answer") or (
+                "Workflow failed before completing the task. "
+                f"error_type: {state.get('error_type', '') or 'unknown'}"
+            )
+        else:
+            fallback_answer = state.get("final_answer", "")
+        payload = _invoke_json_node(
+            model=model,
+            system_prompt=FINALIZER_PROMPT
+            + """
+Return only JSON:
+{
+  "final_answer": "concise user-facing answer",
+  "status": "done|failed|need_user"
+}
+Do not invent tool results. Preserve required confirmation prompts for high-risk tasks.
+""",
+            user_prompt=_finalizer_user_prompt(state, fallback_answer),
+            fallback={"final_answer": fallback_answer, "status": state.get("status", "done")},
+        )
+        answer = str(payload.get("final_answer") or fallback_answer)
+        return {
+            **state,
+            "final_answer": answer,
+            "trace_events": _append_event(
+                state,
+                TraceEvent(event_type="finalizer", content=answer, ok=state.get("status") != "failed"),
+            ),
+        }
+
+    return run
 
 
 def classify_task_type(user_input: str) -> TaskType:
@@ -419,6 +566,73 @@ def _executor_prompt(state: AgentState) -> str:
     return "\n".join(lines)
 
 
+def _planner_user_prompt(state: AgentState, fallback_plan: list[dict[str, Any]]) -> str:
+    return "\n".join(
+        [
+            f"User request:\n{state.get('user_input', '')}",
+            "",
+            f"Router output: task_type={state.get('task_type')} route={state.get('route')} "
+            f"risk={state.get('risk')} difficulty={state.get('difficulty')}",
+            "",
+            "Fallback plan for reference:",
+            _format_plan(fallback_plan),
+        ]
+    )
+
+
+def _verifier_user_prompt(state: AgentState) -> str:
+    return "\n".join(
+        [
+            f"User request:\n{state.get('user_input', '')}",
+            "",
+            f"Router: task_type={state.get('task_type')} route={state.get('route')} "
+            f"risk={state.get('risk')} difficulty={state.get('difficulty')}",
+            "",
+            "Plan:",
+            _format_plan(state.get("plan", [])),
+            "",
+            f"Executor final answer:\n{state.get('final_answer', '')}",
+            "",
+            f"Executor status: {state.get('status')}",
+            f"Error type: {state.get('error_type', '')}",
+        ]
+    )
+
+
+def _reflection_user_prompt(state: AgentState) -> str:
+    return "\n".join(
+        [
+            f"User request:\n{state.get('user_input', '')}",
+            "",
+            "Plan:",
+            _format_plan(state.get("plan", [])),
+            "",
+            f"Status: {state.get('status')}",
+            f"Error type: {state.get('error_type', '')}",
+            f"Tool results: {state.get('tool_results', [])}",
+        ]
+    )
+
+
+def _finalizer_user_prompt(state: AgentState, fallback_answer: str) -> str:
+    return "\n".join(
+        [
+            f"User request:\n{state.get('user_input', '')}",
+            "",
+            f"Workflow status: {state.get('status')}",
+            f"Task type: {state.get('task_type')}",
+            f"Route: {state.get('route')}",
+            "",
+            "Plan:",
+            _format_plan(state.get("plan", [])),
+            "",
+            f"Executor answer:\n{state.get('final_answer', '')}",
+            "",
+            f"Fallback final answer:\n{fallback_answer}",
+        ]
+    )
+
+
 def _confirmation_answer(state: AgentState) -> str:
     return (
         "This request was classified as high risk and needs confirmation before execution.\n"
@@ -438,6 +652,84 @@ def _format_plan(plan: list[dict[str, Any]]) -> str:
 
 def _append_event(state: AgentState, event: TraceEvent) -> list[TraceEvent]:
     return [*state.get("trace_events", []), event]
+
+
+def _invoke_json_node(
+    model: Any,
+    system_prompt: str,
+    user_prompt: str,
+    fallback: dict[str, Any],
+) -> dict[str, Any]:
+    try:
+        result = model.invoke(
+            [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=user_prompt),
+            ]
+        )
+        text = _message_content_to_text(result.content)
+        parsed = _parse_json_object(text)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+    return fallback
+
+
+def _parse_json_object(text: str) -> dict[str, Any] | None:
+    stripped = text.strip()
+    if not stripped:
+        return None
+    try:
+        parsed = json.loads(stripped)
+        return parsed if isinstance(parsed, dict) else None
+    except json.JSONDecodeError:
+        pass
+
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", stripped, flags=re.DOTALL)
+    if fenced:
+        try:
+            parsed = json.loads(fenced.group(1))
+            return parsed if isinstance(parsed, dict) else None
+        except json.JSONDecodeError:
+            pass
+
+    start = stripped.find("{")
+    end = stripped.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            parsed = json.loads(stripped[start : end + 1])
+            return parsed if isinstance(parsed, dict) else None
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
+def _coerce_literal(value: Any, allowed: set[str], fallback: Any) -> Any:
+    if isinstance(value, str) and value in allowed:
+        return value
+    return fallback
+
+
+def _coerce_plan(value: Any, fallback: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return fallback
+    plan: list[dict[str, Any]] = []
+    for index, item in enumerate(value[:5], start=1):
+        if not isinstance(item, dict):
+            continue
+        description = str(item.get("description") or "").strip()
+        if not description:
+            continue
+        action = str(item.get("action") or _step_action(description)).strip()
+        plan.append(
+            {
+                "step": int(item.get("step") or index),
+                "action": action,
+                "description": description,
+            }
+        )
+    return plan or fallback
 
 
 def _message_content_to_text(content: Any) -> str:

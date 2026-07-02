@@ -270,7 +270,7 @@ python -m agent_project.evals.runner \
 
 指标包括 `route_accuracy`、`tool_call_accuracy`、`task_success_rate`、`groundedness`、`latency_seconds`、`tokens_or_prompt_chars` 和 `human_intervention_count`。
 
-## 初步全自动化工作流
+## 全自动化工作流
 
 `build_agent()` 现在返回显式 `StateGraph` 工作流，而不是直接把所有行为包进一个 `create_react_agent`：
 
@@ -284,16 +284,16 @@ User Input
   -> Finalizer
 ```
 
-当前版本的边界：
+当前版本的节点实现：
 
-- `Router`：确定性判断 `chat / work_message / code_task / research / file_task / rag_qa`，并给出 `self / codex / ask_user / defer` 路由、风险和难度。
-- `Planner`：按任务类型生成最多 5 步结构化计划；高风险任务会进入 `need_user`，不会自动执行。
+- `Router`：用独立 system prompt 调用当前模型，输出 JSON：`task_type`、`route`、`risk`、`difficulty`、`rationale`。
+- `Planner`：用独立 system prompt 调用当前模型，输出最多 5 步 JSON plan；高风险任务会进入 `need_user`，不会自动执行。
 - `Executor`：复用已有 ReAct 工具执行器执行计划，保留现有工具能力和审批机制。
-- `Verifier`：检查是否有最终答案或执行失败。
-- `Reflector`：失败时写入本轮反思状态。
-- `Finalizer`：输出面向用户的最终答复。
+- `Verifier`：用独立 system prompt 调用当前模型，检查执行结果是否满足计划，输出 `done / failed / need_user`。
+- `Reflector`：用独立 system prompt 调用当前模型，在失败时生成反思和失败类型。
+- `Finalizer`：用独立 system prompt 调用当前模型，生成最终面向用户的答复。
 
-每轮 workflow 的节点事件会进入 trace，可通过 `agent_traces` / `agent_trace_events` 查看。后续可以逐步把 Router、Planner、Verifier、Reflector、Finalizer 从确定性逻辑升级为同一模型的不同 system prompt 调用。
+每个 LLM 节点都要求只输出 JSON；如果模型输出格式错误或调用失败，会回退到确定性规则，保证 workflow 不会因为 JSON 格式波动直接崩溃。每轮 workflow 的节点事件会进入 trace，可通过 `agent_traces` / `agent_trace_events` 查看。
 
 ## Goal 驱动的自我改进闭环
 

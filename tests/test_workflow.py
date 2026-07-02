@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from agent_project.workflow import build_plan, classify_route_risk_difficulty, classify_task_type
+from agent_project.workflow import (
+    _coerce_plan,
+    _parse_json_object,
+    build_plan,
+    classify_route_risk_difficulty,
+    classify_task_type,
+)
 
 
 def test_workflow_router_classifies_work_message() -> None:
@@ -44,4 +50,26 @@ def test_workflow_plan_stops_high_risk_requests_for_confirmation() -> None:
             "action": "ask_user",
             "description": "Request confirmation before high-risk work.",
         }
+    ]
+
+
+def test_parse_json_object_accepts_fenced_json() -> None:
+    parsed = _parse_json_object('```json\n{"status": "done", "ok": true}\n```')
+    assert parsed == {"status": "done", "ok": True}
+
+
+def test_coerce_plan_limits_and_normalizes_steps() -> None:
+    fallback = [{"step": 1, "action": "execute", "description": "fallback"}]
+    plan = _coerce_plan(
+        [
+            {"description": "Read context"},
+            {"step": 2, "action": "verify", "description": "Check result"},
+            {"step": 3},
+        ],
+        fallback,
+    )
+
+    assert plan == [
+        {"step": 1, "action": "retrieve_context", "description": "Read context"},
+        {"step": 2, "action": "verify", "description": "Check result"},
     ]
