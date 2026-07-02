@@ -58,6 +58,7 @@ from agent_project.tools.work_management import (
     list_work_tasks,
     update_work_task,
 )
+from agent_project.tools.work_vectors import index_work_record_vectors, search_work_record_vectors
 
 
 _BINARY_OPS = {
@@ -157,6 +158,8 @@ def get_tools():
         read_skill,
         read_skill_file,
         list_work_record_items,
+        index_work_record_vectors,
+        search_work_record_vectors,
         add_work_record_item,
         capture_work_message,
         create_work_task,

@@ -31,6 +31,8 @@ class Settings:
     agent_skills_dirs: str | None = None
     agent_skill_catalog_limit: int = 25
     agent_recursion_limit: int = 100
+    agent_embedding_model_path: str = "/home/qiao/models/embedding/Qwen__Qwen3-Embedding-0.6B"
+    agent_embedding_device: str = "cpu"
 
 
 def load_settings() -> Settings:
@@ -62,6 +64,11 @@ def load_settings() -> Settings:
         agent_skills_dirs=os.getenv("AGENT_SKILLS_DIRS"),
         agent_skill_catalog_limit=int(os.getenv("AGENT_SKILL_CATALOG_LIMIT", "25")),
         agent_recursion_limit=int(os.getenv("AGENT_RECURSION_LIMIT", "100")),
+        agent_embedding_model_path=os.getenv(
+            "AGENT_EMBEDDING_MODEL_PATH",
+            "/home/qiao/models/embedding/Qwen__Qwen3-Embedding-0.6B",
+        ),
+        agent_embedding_device=os.getenv("AGENT_EMBEDDING_DEVICE", "cpu"),
         agent_enable_human_approval=os.getenv("AGENT_ENABLE_HUMAN_APPROVAL", "true")
         .strip()
         .lower()

@@ -42,15 +42,16 @@ def _read_record() -> str:
 
 
 def parse_work_record(text: str) -> list[WorkRecordItem]:
+    container_mode = _has_work_record_container(text)
     sections: list[tuple[str, list[str]]] = []
     current_title = ""
     current_lines: list[str] = []
     for line in text.splitlines():
-        match = re.match(r"^#\s+(.+?)\s*$", line)
-        if match:
+        match = re.match(r"^(#+)\s+(.+?)\s*$", line)
+        if match and _is_work_item_heading(match.group(1), match.group(2), container_mode):
             if current_title:
                 sections.append((current_title, current_lines))
-            current_title = match.group(1).strip()
+            current_title = match.group(2).strip()
             current_lines = []
         else:
             current_lines.append(line)
@@ -61,23 +62,19 @@ def parse_work_record(text: str) -> list[WorkRecordItem]:
     for title, lines in sections:
         paths: list[str] = []
         progress_lines: list[str] = []
-        mode = ""
         for line in lines:
             stripped = line.strip()
-            if stripped.startswith("## "):
-                heading = stripped[3:].strip()
-                if heading in {"项目文件", "项目路径"}:
-                    mode = "paths"
-                elif heading in {"工作进展", "最近进展", "进展"}:
-                    mode = "progress"
-                else:
-                    mode = ""
+            if not stripped:
                 continue
-            if mode == "paths":
-                candidate = stripped.lstrip("- ").strip("`").strip()
-                if candidate.startswith("/"):
+            path_matches = re.findall(r"`(/[^`]+)`|(?<![\w`])(/[^\s`，。；,;]+)", stripped)
+            for backticked, plain in path_matches:
+                candidate = (backticked or plain).strip()
+                if candidate and candidate not in paths:
                     paths.append(candidate)
-            elif mode == "progress" and stripped:
+            if any(
+                marker in stripped
+                for marker in ("状态", "最近进展", "工作进展", "下一步", "主要不足", "更新时间")
+            ):
                 progress_lines.append(stripped)
         items.append(
             WorkRecordItem(
@@ -88,6 +85,27 @@ def parse_work_record(text: str) -> list[WorkRecordItem]:
             )
         )
     return items
+
+
+def _has_work_record_container(text: str) -> bool:
+    lines = text.splitlines()
+    top_level_titles = [
+        match.group(1).strip()
+        for line in lines
+        if (match := re.match(r"^#\s+(.+?)\s*$", line))
+    ]
+    return bool(top_level_titles and top_level_titles[0] in {"工作记录", "Work Record"})
+
+
+def _is_work_item_heading(marker: str, title: str, container_mode: bool) -> bool:
+    clean_title = title.strip()
+    if clean_title in {"工作记录", "Work Record"}:
+        return False
+    if len(marker) == 1:
+        return True
+    if container_mode and len(marker) == 2:
+        return clean_title not in {"项目文件", "项目路径", "工作进展", "最近进展", "进展"}
+    return False
 
 
 def _keywords(text: str) -> set[str]:
@@ -107,6 +125,15 @@ def _keywords(text: str) -> set[str]:
 
 
 def _classify_against_record(content: str, items: list[WorkRecordItem]) -> tuple[str, str]:
+    try:
+        from agent_project.tools.work_vectors import best_work_record_match
+
+        matched_title, score = best_work_record_match(content)
+        if matched_title:
+            return matched_title, f"existing_work_vector_score_{score:.3f}"
+    except Exception:
+        pass
+
     content_words = _keywords(content)
     best_title = ""
     best_score = 0

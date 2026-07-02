@@ -11,6 +11,8 @@ from agent_project.llms import build_chat_model
 from agent_project.tools import get_tools
 from agent_project.tools.memory import recent_memory_context
 from agent_project.tools.skills import skill_catalog_text
+from agent_project.tracing import TraceEvent, TraceStore
+from agent_project.workflow import build_workflow_agent
 
 
 DEFAULT_SYSTEM_PROMPT = """You are a practical AI agent.
@@ -110,7 +112,7 @@ def _system_prompt_with_context(system_prompt: str, settings: Settings) -> str:
     return "\n\n".join(parts)
 
 
-def build_agent(settings: Settings | None = None, system_prompt: str = DEFAULT_SYSTEM_PROMPT):
+def build_react_agent(settings: Settings | None = None, system_prompt: str = DEFAULT_SYSTEM_PROMPT):
     settings = settings or load_settings()
     system_prompt = _system_prompt_with_context(system_prompt, settings)
     model = build_chat_model(settings)
@@ -121,18 +123,49 @@ def build_agent(settings: Settings | None = None, system_prompt: str = DEFAULT_S
         return create_react_agent(model, tools, state_modifier=system_prompt)
 
 
+def build_agent(settings: Settings | None = None, system_prompt: str = DEFAULT_SYSTEM_PROMPT):
+    settings = settings or load_settings()
+    system_prompt = _system_prompt_with_context(system_prompt, settings)
+    return build_workflow_agent(settings, system_prompt)
+
+
 def invoke_agent(user_input: str, settings: Settings | None = None) -> str:
     settings = settings or load_settings()
     agent = build_agent(settings)
+    trace = TraceStore()
+    trace.start(user_input=user_input, model=_model_name(settings))
     try:
         result = agent.invoke(
             {"messages": [HumanMessage(content=user_input)]},
             config={"recursion_limit": settings.agent_recursion_limit},
         )
     except GraphRecursionError:
-        return (
+        answer = (
             "Agent stopped because it reached AGENT_RECURSION_LIMIT="
             f"{settings.agent_recursion_limit}. Raise AGENT_RECURSION_LIMIT for long "
             "research tasks, or use interactive chat sessions so the work can be resumed."
         )
-    return message_content_to_text(result["messages"][-1].content)
+        trace.finish(answer, success=False, error_type="GraphRecursionError")
+        return answer
+    except Exception as exc:
+        trace.add_event(TraceEvent(event_type="error", content=str(exc), ok=False))
+        trace.finish("", success=False, error_type=type(exc).__name__)
+        raise
+
+    for event in result.get("trace_events", []):
+        trace.add_event(event)
+    answer = result.get("final_answer") or message_content_to_text(result["messages"][-1].content)
+    trace.finish(answer, success=True)
+    return answer
+
+
+def _model_name(settings: Settings) -> str:
+    if settings.model_provider == "local-vllm":
+        return settings.local_vllm_model
+    if settings.model_provider == "openai-compatible":
+        return settings.openai_compatible_model
+    if settings.model_provider == "google":
+        return settings.google_model
+    if settings.model_provider == "anthropic":
+        return settings.anthropic_model
+    return settings.openai_model

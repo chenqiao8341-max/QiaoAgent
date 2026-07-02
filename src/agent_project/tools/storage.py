@@ -209,5 +209,51 @@ def _initialize(connection: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_agent_goal_events_goal_created
             ON agent_goal_events(goal_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS work_record_vectors (
+            title TEXT PRIMARY KEY,
+            paths TEXT NOT NULL DEFAULT '',
+            progress TEXT NOT NULL DEFAULT '',
+            raw TEXT NOT NULL DEFAULT '',
+            content_hash TEXT NOT NULL,
+            embedding_json TEXT NOT NULL,
+            model_path TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_work_record_vectors_updated
+            ON work_record_vectors(updated_at);
+
+        CREATE TABLE IF NOT EXISTS agent_traces (
+            trace_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL DEFAULT '',
+            user_input TEXT NOT NULL,
+            model TEXT NOT NULL DEFAULT '',
+            final_answer TEXT NOT NULL DEFAULT '',
+            latency_ms INTEGER NOT NULL DEFAULT 0,
+            success INTEGER NOT NULL DEFAULT 0,
+            error_type TEXT NOT NULL DEFAULT '',
+            started_at TEXT NOT NULL,
+            completed_at TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_agent_traces_started
+            ON agent_traces(started_at);
+
+        CREATE TABLE IF NOT EXISTS agent_trace_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trace_id TEXT NOT NULL,
+            event_index INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            content TEXT NOT NULL DEFAULT '',
+            tool TEXT NOT NULL DEFAULT '',
+            args_json TEXT NOT NULL DEFAULT '',
+            ok INTEGER,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (trace_id) REFERENCES agent_traces(trace_id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_agent_trace_events_trace
+            ON agent_trace_events(trace_id, event_index);
         """
     )

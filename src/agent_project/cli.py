@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage
 from langgraph.errors import GraphRecursionError
 
 from agent_project.agent import build_agent, invoke_agent, message_content_to_text
@@ -19,9 +20,15 @@ from agent_project.sessions import (
     list_sessions,
     load_session_messages,
 )
+from agent_project.tracing import TraceEvent, TraceStore
 
 
-def _stream_agent_response(agent: Any, messages: list, recursion_limit: int) -> list:
+def _stream_agent_response(
+    agent: Any,
+    messages: list,
+    recursion_limit: int,
+    trace: TraceStore | None = None,
+) -> list:
     """Stream the latest agent response and return the updated message history."""
     started_answer = False
     latest_messages = messages
@@ -44,20 +51,34 @@ def _stream_agent_response(agent: Any, messages: list, recursion_limit: int) -> 
                     print(text, end="", flush=True)
 
             elif stream_mode == "values":
-                latest_messages = chunk["messages"]
+                if "messages" in chunk:
+                    latest_messages = chunk["messages"]
+                if chunk.get("final_answer"):
+                    latest_messages = [
+                        *latest_messages,
+                        AIMessage(content=chunk["final_answer"]),
+                    ]
     except GraphRecursionError:
         if started_answer:
             print()
-        print(
+        answer = (
             "\nAgent stopped because it reached AGENT_RECURSION_LIMIT="
             f"{recursion_limit}. The partial session was saved; run "
             "`agent-chat resume --last` to continue, or raise AGENT_RECURSION_LIMIT "
             "for long research tasks."
         )
+        print(answer)
+        if trace is not None:
+            trace.finish(answer, success=False, error_type="GraphRecursionError")
         return latest_messages
 
     if started_answer:
         print()
+    elif latest_messages and getattr(latest_messages[-1], "type", "") == "ai":
+        print(f"\nAgent: {message_content_to_text(latest_messages[-1].content)}")
+    if trace is not None and latest_messages:
+        answer = message_content_to_text(latest_messages[-1].content)
+        trace.finish(answer, success=True)
     return latest_messages
 
 
@@ -138,8 +159,32 @@ def run_chat(session: AgentSession | None = None) -> None:
             continue
 
         messages.append(HumanMessage(content=user_text))
-        messages = _stream_agent_response(agent, messages, settings.agent_recursion_limit)
+        trace = TraceStore()
+        trace.start(user_input=user_text, model=_model_name(settings))
+        try:
+            messages = _stream_agent_response(
+                agent,
+                messages,
+                settings.agent_recursion_limit,
+                trace=trace,
+            )
+        except Exception as exc:
+            trace.add_event(TraceEvent(event_type="error", content=str(exc), ok=False))
+            trace.finish("", success=False, error_type=type(exc).__name__)
+            raise
         session = append_turn(session, messages)
+
+
+def _model_name(settings: Any) -> str:
+    if settings.model_provider == "local-vllm":
+        return settings.local_vllm_model
+    if settings.model_provider == "openai-compatible":
+        return settings.openai_compatible_model
+    if settings.model_provider == "google":
+        return settings.google_model
+    if settings.model_provider == "anthropic":
+        return settings.anthropic_model
+    return settings.openai_model
 
 
 def list_saved_sessions(include_all: bool = False) -> None:

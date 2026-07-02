@@ -13,6 +13,9 @@
 - 自动联网搜索，基于 DuckDuckGo HTML 搜索页
 - 轻量浏览器操作：打开网页、抽取正文、列出链接
 - SQLite 长期记忆、工作收件箱、工作任务和持久化任务队列，用于跨会话保存偏好、项目事实和任务状态
+- `/home/qiao/work/aaa-work.md` 工作记录向量检索，用 embedding 辅助判断消息归属哪个项目
+- SQLite Agent trace 记录和离线 eval 底座，用于后续路由、工具选择和任务成功率评测
+- 初步全自动化工作流：显式 LangGraph `StateGraph` 节点 `Router -> Planner -> Executor -> Verifier -> Reflector -> Finalizer`
 - SQLite goal 管理，用于把长任务拆成可迭代的自治工作流
 - 工具执行过程可见化：读取文件、检索网页、执行命令、更新任务时输出进度
 - 命令行交互
@@ -34,6 +37,10 @@ agent_project/
     tools/browser.py   # 轻量浏览器 tools
     tools/tasks.py     # 多步骤任务队列 tools
     tools/skills.py    # Codex-style skill 发现和读取 tools
+    tools/work_vectors.py # 工作记录 embedding 索引和检索
+    tracing/          # Agent trace schema 和 SQLite store
+    evals/            # 离线评测集、指标和报告
+    workflow.py       # 显式多节点工作流编排
   skills/
     work-record-manager/SKILL.md # 工作记录管理示例 skill
   examples/
@@ -196,6 +203,8 @@ AGENT_SKILL_CATALOG_LIMIT=25
 可用工具：
 
 - `list_work_record_items`：读取并解析 `/home/qiao/work/aaa-work.md`。
+- `index_work_record_vectors`：把 `/home/qiao/work/aaa-work.md` 中的工作项写入 SQLite 向量索引。
+- `search_work_record_vectors`：用本地 embedding 模型按语义检索工作项。
 - `capture_work_message`：保存一条手动整理的工作/飞书消息，自动匹配已有工作，生成 `self` / `codex` / `ask_user` / `defer` 路由。
 - `create_work_task`：把 inbox 消息或用户请求转成结构化工作任务。
 - `list_work_inbox` / `list_work_tasks`：查看待处理消息和任务。
@@ -217,6 +226,74 @@ AGENT_SKILL_CATALOG_LIMIT=25
 - `codex`：代码修改、部署排查、脚本执行、测试验证，适合改写任务后交给 Codex。
 - `ask_user`：信息不足，先问你一个短问题。
 - `defer`：低优先级备忘，先存起来。
+
+向量检索默认使用：
+
+```env
+AGENT_EMBEDDING_MODEL_PATH=/home/qiao/models/embedding/Qwen__Qwen3-Embedding-0.6B
+AGENT_EMBEDDING_DEVICE=cpu
+```
+
+首次使用前安装新依赖：
+
+```bash
+cd /home/qiao/work/agent_project
+source .venv/bin/activate
+pip install -e .
+```
+
+如果网络不稳定，可以临时走本机代理端口：
+
+```bash
+HTTPS_PROXY=http://127.0.0.1:17897 HTTP_PROXY=http://127.0.0.1:17897 pip install -e .
+```
+
+## Tracing 和 Evals
+
+`invoke_agent` 和交互式 `agent-chat` 会把每次调用的基础轨迹写入 SQLite，表包括 `agent_traces` 和 `agent_trace_events`。当前记录 user input、final answer、latency、success/error，后续多节点图或工具回调可以继续追加更细粒度事件。
+
+离线评测集在 `evals/work_agent_v1.jsonl`，共 80 条：
+
+- 20 条消息分类任务
+- 20 条工作任务拆解任务
+- 15 条本地文件检索/修改建议任务
+- 15 条 RAG 问答任务
+- 10 条 Codex delegation 路由任务
+
+运行评测：
+
+```bash
+python -m agent_project.evals.runner \
+  --dataset evals/work_agent_v1.jsonl \
+  --report .agent_state/eval_reports/latest.json
+```
+
+指标包括 `route_accuracy`、`tool_call_accuracy`、`task_success_rate`、`groundedness`、`latency_seconds`、`tokens_or_prompt_chars` 和 `human_intervention_count`。
+
+## 初步全自动化工作流
+
+`build_agent()` 现在返回显式 `StateGraph` 工作流，而不是直接把所有行为包进一个 `create_react_agent`：
+
+```text
+User Input
+  -> Router
+  -> Planner
+  -> Executor
+  -> Verifier
+  -> Reflector
+  -> Finalizer
+```
+
+当前版本的边界：
+
+- `Router`：确定性判断 `chat / work_message / code_task / research / file_task / rag_qa`，并给出 `self / codex / ask_user / defer` 路由、风险和难度。
+- `Planner`：按任务类型生成最多 5 步结构化计划；高风险任务会进入 `need_user`，不会自动执行。
+- `Executor`：复用已有 ReAct 工具执行器执行计划，保留现有工具能力和审批机制。
+- `Verifier`：检查是否有最终答案或执行失败。
+- `Reflector`：失败时写入本轮反思状态。
+- `Finalizer`：输出面向用户的最终答复。
+
+每轮 workflow 的节点事件会进入 trace，可通过 `agent_traces` / `agent_trace_events` 查看。后续可以逐步把 Router、Planner、Verifier、Reflector、Finalizer 从确定性逻辑升级为同一模型的不同 system prompt 调用。
 
 ## Goal 驱动的自我改进闭环
 
