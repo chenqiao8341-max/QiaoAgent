@@ -29,6 +29,15 @@ from agent_project.tools.feishu import (
     list_feishu_messages,
     list_feishu_reports,
 )
+from agent_project.tools.goals import (
+    create_agent_goal,
+    create_self_improvement_codex_prompt,
+    get_agent_goal,
+    list_agent_goals,
+    record_agent_goal_event,
+    run_agent_goal_cycle,
+    update_agent_goal,
+)
 from agent_project.tools.memory import delete_memory, get_memory, remember_memory, search_memories
 from agent_project.tools.shell import execute_shell_command
 from agent_project.tools.skills import list_skills, read_skill, read_skill_file
@@ -129,6 +138,13 @@ def get_tools():
         list_codex_tasks,
         get_codex_task,
         test_codex_connectivity,
+        create_agent_goal,
+        update_agent_goal,
+        record_agent_goal_event,
+        get_agent_goal,
+        list_agent_goals,
+        create_self_improvement_codex_prompt,
+        run_agent_goal_cycle,
         record_task_difficulty_judgment,
         create_codex_review_packet,
         start_codex_review,

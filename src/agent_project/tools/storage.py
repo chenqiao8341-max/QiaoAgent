@@ -176,5 +176,38 @@ def _initialize(connection: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_work_tasks_status_updated
             ON work_tasks(status, updated_at);
+
+        CREATE TABLE IF NOT EXISTS agent_goals (
+            goal_id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            objective TEXT NOT NULL,
+            status TEXT NOT NULL,
+            phase TEXT NOT NULL DEFAULT 'created',
+            priority TEXT NOT NULL DEFAULT 'normal',
+            iteration INTEGER NOT NULL DEFAULT 0,
+            success_criteria TEXT NOT NULL DEFAULT '',
+            evidence TEXT NOT NULL DEFAULT '',
+            codex_session_id TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            completed_at TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_agent_goals_status_updated
+            ON agent_goals(status, updated_at);
+
+        CREATE TABLE IF NOT EXISTS agent_goal_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            goal_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            phase TEXT NOT NULL DEFAULT '',
+            summary TEXT NOT NULL,
+            details TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (goal_id) REFERENCES agent_goals(goal_id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_agent_goal_events_goal_created
+            ON agent_goal_events(goal_id, created_at);
         """
     )

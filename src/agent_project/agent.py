@@ -34,6 +34,18 @@ Use Feishu tools to inspect captured messages and generate message reports.
 Use skills when a listed skill matches the user request: first call read_skill for that skill,
 then follow its instructions and read referenced skill files only when needed.
 Use Codex delegation tools only when the user asks to hand a task to Codex.
+Use agent goal tools for long-running autonomous workflows. Create a goal before
+research/delegation/testing loops, update its phase as work moves through researching,
+gap_analysis, prioritizing, delegating, testing, and iterating, and record important
+findings or test results as goal events.
+For self-improvement work, first create_agent_goal, then research current mature agent
+capabilities with web_search/open_web_page, record findings, assess your own project
+gaps from local files, choose the highest-priority improvement, and call
+create_self_improvement_codex_prompt before starting Codex.
+When the user wants the workflow to run with less manual orchestration, use
+run_agent_goal_cycle. In auto mode it advances one bounded step at a time:
+research, delegation, or testing. Do not create unbounded self-recursive loops.
+Prefer codex-proxy-1 for Codex delegation unless the user specifies another wrapper.
 For one-shot tasks use run_codex_task.
 For interactive Codex work, call start_codex_session, read the returned output and session_id,
 then call continue_codex_session with that exact session_id as many times as needed.

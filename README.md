@@ -13,6 +13,7 @@
 - 自动联网搜索，基于 DuckDuckGo HTML 搜索页
 - 轻量浏览器操作：打开网页、抽取正文、列出链接
 - SQLite 长期记忆、工作收件箱、工作任务和持久化任务队列，用于跨会话保存偏好、项目事实和任务状态
+- SQLite goal 管理，用于把长任务拆成可迭代的自治工作流
 - 工具执行过程可见化：读取文件、检索网页、执行命令、更新任务时输出进度
 - 命令行交互
 - 简单可扩展的项目结构
@@ -216,6 +217,32 @@ AGENT_SKILL_CATALOG_LIMIT=25
 - `codex`：代码修改、部署排查、脚本执行、测试验证，适合改写任务后交给 Codex。
 - `ask_user`：信息不足，先问你一个短问题。
 - `defer`：低优先级备忘，先存起来。
+
+## Goal 驱动的自我改进闭环
+
+这个项目现在支持一个更接近 Codex 的工作方式：把“自我改进”显式建成一个 goal，再围绕它做调研、差距分析、Codex 委托、重启验证和下一轮迭代。
+
+新增工具包括：
+
+- `create_agent_goal` / `update_agent_goal` / `get_agent_goal` / `list_agent_goals`
+- `record_agent_goal_event`
+- `create_self_improvement_codex_prompt`
+- `run_agent_goal_cycle`
+
+推荐流程是：
+
+1. 创建一个高层 goal，写清楚目标和成功标准。
+2. 联网调研成熟 agent 的能力。
+3. 读取本地项目代码，整理自己和成熟 agent 的差距。
+4. 选出优先级最高的改进点。
+5. 用 `create_self_improvement_codex_prompt` 生成给 Codex 的委托提示。
+6. 通过 `start_codex_session`、`run_codex_task`，或者直接用 `run_agent_goal_cycle` 交给 Codex。
+7. Codex 完成修改后，重启 agent 并按同一 goal 再做一次测试。
+8. 用 `update_agent_goal` 记录阶段、迭代次数、证据和结果。
+
+`run_agent_goal_cycle` 一次只推进一个受控步骤。`mode=auto` 会根据当前 goal phase 选择 research、delegate 或 test，不会在单次调用里做无限循环。
+
+默认 Codex wrapper 现在优先使用 `codex-proxy-1`，也可以通过 `AGENT_CODEX_COMMAND` 覆盖。
 
 ## Feishu 监视和 Codex 代理
 

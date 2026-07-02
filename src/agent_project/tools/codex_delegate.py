@@ -43,7 +43,7 @@ def _coerce_text(value: object) -> str:
 
 
 def _configured_codex_command() -> str:
-    return os.getenv("AGENT_CODEX_COMMAND", "codex").strip() or "codex"
+    return os.getenv("AGENT_CODEX_COMMAND", "codex-proxy-1").strip() or "codex-proxy-1"
 
 
 def _resolve_codex_command(command_name: str) -> str | None:
