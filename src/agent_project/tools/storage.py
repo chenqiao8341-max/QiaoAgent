@@ -249,6 +249,13 @@ def _initialize(connection: sqlite3.Connection) -> None:
             tool TEXT NOT NULL DEFAULT '',
             args_json TEXT NOT NULL DEFAULT '',
             ok INTEGER,
+            duration_ms INTEGER NOT NULL DEFAULT 0,
+            parent_event_id INTEGER,
+            node TEXT NOT NULL DEFAULT '',
+            raw_error TEXT NOT NULL DEFAULT '',
+            tool_call_id TEXT NOT NULL DEFAULT '',
+            token_usage_json TEXT NOT NULL DEFAULT '{}',
+            prompt_chars INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,
             FOREIGN KEY (trace_id) REFERENCES agent_traces(trace_id) ON DELETE CASCADE
         );
@@ -312,3 +319,23 @@ def _initialize(connection: sqlite3.Connection) -> None:
             ON knowledge_chunks(citation_id);
         """
     )
+    _ensure_columns(
+        connection,
+        "agent_trace_events",
+        {
+            "duration_ms": "INTEGER NOT NULL DEFAULT 0",
+            "parent_event_id": "INTEGER",
+            "node": "TEXT NOT NULL DEFAULT ''",
+            "raw_error": "TEXT NOT NULL DEFAULT ''",
+            "tool_call_id": "TEXT NOT NULL DEFAULT ''",
+            "token_usage_json": "TEXT NOT NULL DEFAULT '{}'",
+            "prompt_chars": "INTEGER NOT NULL DEFAULT 0",
+        },
+    )
+
+
+def _ensure_columns(connection: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
+    existing = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
+    for name, definition in columns.items():
+        if name not in existing:
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")

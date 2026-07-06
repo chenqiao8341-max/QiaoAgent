@@ -38,8 +38,10 @@ class TraceStore:
             connection.execute(
                 """
                 INSERT INTO agent_trace_events(
-                    trace_id, event_index, event_type, content, tool, args_json, ok, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    trace_id, event_index, event_type, content, tool, args_json, ok,
+                    duration_ms, parent_event_id, node, raw_error, tool_call_id,
+                    token_usage_json, prompt_chars, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     self.trace_id,
@@ -49,6 +51,13 @@ class TraceStore:
                     event.tool,
                     json.dumps(event.args, ensure_ascii=False, sort_keys=True),
                     None if event.ok is None else int(event.ok),
+                    event.duration_ms,
+                    event.parent_event_id,
+                    event.node,
+                    event.raw_error,
+                    event.tool_call_id,
+                    json.dumps(event.token_usage, ensure_ascii=False, sort_keys=True),
+                    event.prompt_chars,
                     _now(),
                 ),
             )
@@ -104,6 +113,13 @@ class TraceStore:
                     "tool": event["tool"],
                     "args": json.loads(event["args_json"] or "{}"),
                     "ok": None if event["ok"] is None else bool(event["ok"]),
+                    "duration_ms": event["duration_ms"],
+                    "parent_event_id": event["parent_event_id"],
+                    "node": event["node"],
+                    "raw_error": event["raw_error"],
+                    "tool_call_id": event["tool_call_id"],
+                    "token_usage": json.loads(event["token_usage_json"] or "{}"),
+                    "prompt_chars": event["prompt_chars"],
                 }
                 for event in events
             ],

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 from pathlib import Path
 from typing import Callable
@@ -26,14 +27,22 @@ def run_live_eval(
     dataset_path: str | Path,
     report_path: str | Path,
     invoke_fn: Callable[[str], str] | None = None,
+    *,
+    limit: int | None = None,
+    category: str = "",
+    fresh_db: bool = False,
+    save_traces: bool = False,
 ) -> dict:
+    if fresh_db:
+        _reset_state_db()
     invoke = invoke_fn or invoke_agent
     completed_examples: list[EvalExample] = []
-    for example in load_dataset(dataset_path):
+    examples = _filter_examples(load_dataset(dataset_path), limit=limit, category=category)
+    for example in examples:
         before = _latest_trace_id()
         answer = invoke(example.input)
         trace = _latest_trace_after(before, example.input)
-        completed_examples.append(_example_with_actuals(example, answer, trace))
+        completed_examples.append(_example_with_actuals(example, answer, trace, save_traces=save_traces))
 
     results = [score_example(example) for example in completed_examples]
     summary = summarize_results(results)
@@ -76,7 +85,34 @@ def _latest_trace_after(previous_trace_id: str, user_input: str) -> dict | None:
     return TraceStore.get_trace(str(row["trace_id"]))
 
 
-def _example_with_actuals(example: EvalExample, answer: str, trace: dict | None) -> EvalExample:
+def _filter_examples(
+    examples: list[EvalExample],
+    *,
+    limit: int | None,
+    category: str,
+) -> list[EvalExample]:
+    filtered = [example for example in examples if not category or example.category == category]
+    if limit is not None and limit >= 0:
+        return filtered[:limit]
+    return filtered
+
+
+def _reset_state_db() -> None:
+    configured = os.getenv("AGENT_STATE_DB_PATH")
+    if not configured:
+        return
+    path = Path(configured).expanduser().resolve()
+    if path.exists():
+        path.unlink()
+
+
+def _example_with_actuals(
+    example: EvalExample,
+    answer: str,
+    trace: dict | None,
+    *,
+    save_traces: bool = False,
+) -> EvalExample:
     if trace is None:
         return example.model_copy(update={"actual_answer": answer})
 
@@ -94,15 +130,21 @@ def _example_with_actuals(example: EvalExample, answer: str, trace: dict | None)
         or "needs_human=true" in str(step.get("content", "")).lower()
     )
     latency_seconds = float(trace.get("latency_ms", 0)) / 1000.0
+    trace_id = str(trace.get("trace_id", ""))
     return example.model_copy(
         update={
             "actual_route": route,
             "actual_tools": tools,
             "actual_answer": answer,
-            "success": bool(answer.strip()) if example.success is None else example.success,
             "latency_seconds": latency_seconds,
             "tokens_or_prompt_chars": len(example.input) + len(answer),
             "human_intervention_count": human_intervention_count,
+            "metadata": (
+                {**example.metadata, "trace_id": trace_id}
+                if save_traces and trace_id
+                else example.metadata
+            ),
+            "success": example.success,
         }
     )
 
@@ -126,8 +168,23 @@ def main() -> None:
         action="store_true",
         help="Actually invoke the agent and score the generated trace outputs.",
     )
+    parser.add_argument("--limit", type=int, help="Maximum examples to run.")
+    parser.add_argument("--category", default="", help="Only run one eval category.")
+    parser.add_argument("--fresh-db", action="store_true", help="Delete AGENT_STATE_DB_PATH before live eval.")
+    parser.add_argument("--save-traces", action="store_true", help="Save trace IDs into result metadata.")
     args = parser.parse_args()
-    summary = run_live_eval(args.dataset, args.report) if args.live else run_eval(args.dataset, args.report)
+    summary = (
+        run_live_eval(
+            args.dataset,
+            args.report,
+            limit=args.limit,
+            category=args.category,
+            fresh_db=args.fresh_db,
+            save_traces=args.save_traces,
+        )
+        if args.live
+        else run_eval(args.dataset, args.report)
+    )
     print(
         "Eval complete: "
         f"count={summary['count']} "

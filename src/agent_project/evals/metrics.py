@@ -15,8 +15,8 @@ def score_example(example: EvalExample) -> EvalResult:
         tool_call_correct = all(tool in example.actual_tools for tool in example.expected_tools)
 
     task_success = example.success
-    if task_success is None and example.expected_answer_contains:
-        task_success = all(fragment in example.actual_answer for fragment in example.expected_answer_contains)
+    if task_success is None:
+        task_success = _infer_task_success(example, route_correct, tool_call_correct)
 
     grounded = example.grounded
     if grounded is None and example.expected_grounding:
@@ -32,7 +32,53 @@ def score_example(example: EvalExample) -> EvalResult:
         latency_seconds=example.latency_seconds,
         tokens_or_prompt_chars=example.tokens_or_prompt_chars or len(example.input),
         human_intervention_count=example.human_intervention_count,
+        notes=_result_notes(example),
     )
+
+
+def _result_notes(example: EvalExample) -> str:
+    trace_id = example.metadata.get("trace_id")
+    if trace_id:
+        return f"trace_id={trace_id}"
+    return ""
+
+
+def _infer_task_success(
+    example: EvalExample,
+    route_correct: bool | None,
+    tool_call_correct: bool | None,
+) -> bool | None:
+    if example.category == "route" and route_correct is not None:
+        return route_correct
+    if example.category in {"rag_qa", "local_file_suggestion", "codex_routing"}:
+        checks = [
+            value
+            for value in (
+                route_correct,
+                tool_call_correct,
+                _contains_expected_answer(example),
+                example.grounded,
+            )
+            if value is not None
+        ]
+        return all(checks) if checks else None
+    if example.category == "planning":
+        checks = [
+            value
+            for value in (
+                _contains_expected_answer(example),
+                tool_call_correct,
+            )
+            if value is not None
+        ]
+        return all(checks) if checks else None
+    return _contains_expected_answer(example)
+
+
+def _contains_expected_answer(example: EvalExample) -> bool | None:
+    if not example.expected_answer_contains:
+        return None
+    return all(fragment in example.actual_answer for fragment in example.expected_answer_contains)
 
 
 def _rate(values: Iterable[bool | None]) -> float | None:

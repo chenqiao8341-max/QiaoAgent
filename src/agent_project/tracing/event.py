@@ -11,3 +11,10 @@ class TraceEvent:
     tool: str = ""
     args: dict[str, Any] = field(default_factory=dict)
     ok: bool | None = None
+    duration_ms: int = 0
+    parent_event_id: int | None = None
+    node: str = ""
+    raw_error: str = ""
+    tool_call_id: str = ""
+    token_usage: dict[str, Any] = field(default_factory=dict)
+    prompt_chars: int = 0

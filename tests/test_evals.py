@@ -89,9 +89,77 @@ def test_live_eval_invokes_agent_and_scores_trace(tmp_path, monkeypatch) -> None
         trace.finish("done", success=True)
         return "done"
 
-    summary = run_live_eval(dataset_path, report_path, invoke_fn=fake_invoke)
+    summary = run_live_eval(
+        dataset_path,
+        report_path,
+        invoke_fn=fake_invoke,
+        limit=1,
+        category="route",
+        save_traces=True,
+    )
     payload = json.loads(report_path.read_text(encoding="utf-8"))
 
     assert summary["route_accuracy"] == 1.0
     assert summary["tool_call_accuracy"] == 1.0
     assert payload["summary"]["task_success_rate"] == 1.0
+    assert payload["results"][0]["notes"]
+
+
+def test_live_eval_filters_category_and_limit(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("AGENT_STATE_DB_PATH", str(tmp_path / "agent.sqlite3"))
+    dataset_path = tmp_path / "dataset.jsonl"
+    report_path = tmp_path / "report.json"
+    dataset_path.write_text(
+        "\n".join(
+            [
+                EvalExample(id="route-1", category="route", input="route", expected_route="self").model_dump_json(),
+                EvalExample(id="rag-1", category="rag_qa", input="rag", expected_tools=["search_knowledge"]).model_dump_json(),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    calls: list[str] = []
+
+    def fake_invoke(user_input: str) -> str:
+        calls.append(user_input)
+        trace = TraceStore()
+        trace.start(user_input=user_input, model="fake")
+        trace.add_event(TraceEvent(event_type="router", content="task_type=chat route=self"))
+        trace.finish("answer", success=True)
+        return "answer"
+
+    summary = run_live_eval(
+        dataset_path,
+        report_path,
+        invoke_fn=fake_invoke,
+        limit=1,
+        category="rag_qa",
+        fresh_db=True,
+    )
+
+    assert calls == ["rag"]
+    assert summary["count"] == 1
+
+
+def test_eval_success_is_not_just_non_empty_answer() -> None:
+    route_case = EvalExample(
+        id="route-fail",
+        category="route",
+        input="route",
+        expected_route="codex",
+        actual_route="self",
+        actual_answer="non-empty",
+    )
+    rag_case = EvalExample(
+        id="rag-fail",
+        category="rag_qa",
+        input="rag",
+        expected_tools=["search_knowledge"],
+        actual_tools=[],
+        actual_answer="non-empty",
+    )
+
+    assert score_example(route_case).task_success is False
+    assert score_example(rag_case).task_success is False
