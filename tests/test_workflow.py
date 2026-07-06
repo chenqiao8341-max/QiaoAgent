@@ -175,6 +175,18 @@ def test_policy_violation_from_trace_events_counts_tool_calls() -> None:
     assert "tool call budget" in violation
 
 
+def test_policy_violation_backs_off_repeated_file_failures() -> None:
+    state = {"task_type": "file_task", "route": "self"}
+    events = [
+        type("Event", (), {"event_type": "tool_result", "tool": "read_local_file", "content": "not found"})(),
+        type("Event", (), {"event_type": "tool_result", "tool": "read_local_file", "content": "denied"})(),
+    ]
+
+    violation = _policy_violation_from_trace_events(state, events, elapsed_seconds=1.0)
+
+    assert "Repeated file tool failures" in violation
+
+
 def test_executor_prompt_includes_approved_human_gate_context() -> None:
     prompt = _executor_prompt(
         {

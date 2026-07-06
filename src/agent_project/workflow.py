@@ -1188,11 +1188,29 @@ def _policy_violation_from_trace_events(
 ) -> str:
     policy = policy_for_task(state.get("task_type", "chat"), state.get("route", "self"))
     tool_call_count = sum(1 for event in events if event.event_type == "tool_call")
+    repeated_file_failure = _repeated_file_tool_failure(events)
+    if repeated_file_failure:
+        return repeated_file_failure
     return task_policy_violation(
         policy,
         tool_call_count=tool_call_count,
         elapsed_seconds=elapsed_seconds,
     )
+
+
+def _repeated_file_tool_failure(events: list[Any]) -> str:
+    file_failures = 0
+    for event in events:
+        if getattr(event, "event_type", "") != "tool_result":
+            continue
+        if getattr(event, "tool", "") not in {"read_local_file", "list_local_directory"}:
+            continue
+        content = str(getattr(event, "content", "")).lower()
+        if any(marker in content for marker in ["not found", "no such file", "denied", "permission"]):
+            file_failures += 1
+    if file_failures >= 2:
+        return "Repeated file tool failures; stop retrying similar paths and summarize known context."
+    return ""
 
 
 def _trace_events_from_executor_messages(messages: list[Any]) -> list[TraceEvent]:
