@@ -156,6 +156,92 @@ class AgentState(TypedDict):
 
 这一步是项目从“用了 LangGraph”变成“懂 Agent 编排”的关键。
 
+- 第 3.5 阶段：进入 RAG 前的稳定化层
+
+目标：在进入第四阶段私有知识库 RAG 前，先补齐“可恢复、可评测、可观测、可控”的工程地基。否则 RAG 接入后，失败很难归因：可能是检索质量、引用质量、路由、工具执行、图循环或 human gate 恢复机制的问题。
+
+优先改造方向：
+
+1. **Human gate 变成可恢复的暂停/继续机制**
+   - 当前 `needs_human=true` 不能只是 finalizer 输出提示后结束。
+   - 应接入 LangGraph checkpointer / interrupt 思路，或先做本地 SQLite 等价实现。
+   - human gate 需要保存 pending state、审批原因、审批 payload、thread/session id。
+   - CLI 需要支持恢复同一工作流，批准后继续执行，而不是重新发起一个新任务。
+
+2. **评测 runner 改成 live eval**
+   - 当前 eval runner 只读取 dataset 中的 `actual_*` 字段离线打分，不真实调用 agent。
+   - 新增 `--live` 模式，逐条调用 agent，并从 trace/node_reports 抽取：
+     - `actual_route`
+     - `actual_tools`
+     - `actual_answer`
+     - `human_intervention_count`
+     - latency / token 或 prompt 字符数
+   - 第四阶段前必须有一份可复现 baseline report，不能继续保留全 0 评测。
+
+3. **补工具级 tracing**
+   - 当前 trace 有节点事件，但 Executor 内部 ReAct 工具调用缺少细粒度事件。
+   - 应记录 `tool_call` / `tool_result`，包含 tool name、args、ok、摘要、耗时。
+   - 第四阶段 RAG 工具必须额外记录 query、top_k、score、source、chunk_id、citation_id。
+
+4. **Reflection 从临时 state 变成持久记忆**
+   - Reflector 的反思不能只在一次 graph run 内传递。
+   - 失败后写入 `namespace="reflections"`，字段包括 task_type、failure_type、reflection、created_from_trace_id。
+   - Planner/Verifier 执行前检索相关 reflection，作为下一次决策上下文。
+
+5. **先定义 RAG 数据契约，再写 RAG 工具**
+   - 在实现 `tools/rag.py` 前，先确定 chunk 和 citation schema：
+     - `source_id`
+     - `source_type`
+     - `path` / `url`
+     - `title`
+     - `heading_path`
+     - `chunk_id`
+     - `content_hash`
+     - `mtime`
+     - `text`
+     - `embedding_model`
+     - `citation_id`
+     - `permissions`
+     - `indexed_at`
+   - 这个契约要支持增量索引、引用校验、去重、权限过滤。
+
+6. **Citation verifier**
+   - RAG 回答中出现的引用必须来自本轮 retrieved chunks。
+   - 如果引用缺失、引用 ID 不存在、引用内容不支持回答，Verifier 必须判失败并触发反思/重试。
+
+7. **ProjectContext loader 与 Knowledge RAG 分层**
+   - 路由到项目后，读取项目工作态势不是泛 RAG 问答。
+   - 新增或规划 `load_project_context(project)`：
+     - README
+     - current_status.md
+     - todo.md
+     - last_report.json
+     - 最近 git diff
+     - 最近任务记录
+   - ProjectContext 用于 Planner，Knowledge RAG 用于文档问答和引用回答。
+
+8. **节点输出 schema 化**
+   - Router/Planner/Verifier/Reflector 不应长期依赖宽松 JSON 字典。
+   - 用 Pydantic 或 TypedDict 明确输出结构，解析失败要进入 node_report，并记录 fallback 原因。
+
+9. **中风险分支策略落成确定性工具**
+   - “中风险开新分支且不要自动 merge main”不能只靠 prompt。
+   - 增加 `ensure_work_branch()` 或 GitSafety 节点，检查当前分支、dirty 状态、创建任务分支、禁止自动 merge。
+
+10. **Adaptive retrieval**
+    - 不要让所有 `rag_qa` 固定检索。
+    - Router/Planner 增加 `retrieval_needed` 和 `retrieval_scope`。
+    - 简单聊天不检索；本地文档问答、项目状态问答、显式引用要求才检索。
+
+进入第四阶段前的最小完成标准：
+
+- live eval 能跑通，并产出非 0 指标。
+- 每次工具调用、检索结果、引用都能进入 trace。
+- human gate 可以 resume，不只是提示后结束。
+- reflection 至少能持久写入和检索。
+- RAG chunk/citation schema 已确定并有表结构或数据类。
+- ProjectContext loader 与 Knowledge RAG 分层清楚。
+
 - 第四阶段：做私有知识库 RAG
 
 知识库来源：

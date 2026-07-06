@@ -11,6 +11,8 @@ from langgraph.prebuilt import create_react_agent
 from agent_project.config import Settings
 from agent_project.llms import build_chat_model
 from agent_project.tools import get_tools
+from agent_project.tools.human_gate import create_human_gate_request
+from agent_project.tools.memory import reflection_memory_context, store_reflection_memory
 from agent_project.tracing import TraceEvent
 
 
@@ -41,8 +43,13 @@ class AgentState(TypedDict, total=False):
     node_reports: list[dict[str, Any]]
     needs_human: bool
     human_gate_reason: str
+    human_gate_id: str
+    approved_human_gate_id: str
+    approved_human_gate_reason: str
+    human_gate_response: str
     verifier_failures: int
     retry_target: RetryTarget
+    trace_id: str
     trace_events: list[TraceEvent]
 
 
@@ -61,7 +68,7 @@ The plan should be executable by the available tools or by Codex delegation."""
 EXECUTOR_PROMPT = """You are the Executor node.
 Execute the plan using available tools. For work messages, capture and route the message first.
 For code/deployment/test-heavy tasks, create a work task and prepare Codex delegation when useful.
-For medium-risk repo work, use an isolated branch and do not merge it back to main automatically.
+For medium-risk repo work, call ensure_work_branch before edits, use an isolated branch, and do not merge it back to main automatically.
 Before starting Codex delegation, call test_codex_connectivity with command_names="codex-proxy-anyrouter,codex-proxy-cccx,codex".
 Choose the first usable Codex command in this exact priority order: codex-proxy-anyrouter, codex-proxy-cccx, codex.
 Pass that chosen command with codex_command when calling run_codex_task, start_codex_session, or continue_codex_session.
@@ -132,6 +139,27 @@ def _build_react_executor(model: Any, tools: list[Any], prompt: str):
 def _router_node(model: Any):
     def run(state: AgentState) -> AgentState:
         user_input = _state_user_input(state)
+        if _is_human_gate_resume(state) and state.get("task_type"):
+            report = _node_report(
+                "router",
+                "Router resumed an approved human gate using saved route state.",
+                status="running",
+                needs_human=False,
+                data={"human_gate_id": state.get("approved_human_gate_id", "")},
+            )
+            return {
+                **state,
+                "user_input": user_input,
+                "status": "running",
+                "needs_human": False,
+                "human_gate_reason": "",
+                "node_reports": _append_node_report(state, report),
+                "trace_events": _append_event(
+                    state,
+                    TraceEvent(event_type="router", content=report["summary"], ok=True),
+                ),
+            }
+
         fallback_task_type = classify_task_type(user_input)
         fallback_route, fallback_risk, fallback_difficulty = classify_route_risk_difficulty(
             user_input,
@@ -223,6 +251,27 @@ def _planner_node(model: Any):
             risk=state.get("risk", "low"),
             difficulty=state.get("difficulty", "low"),
         )
+        if _is_human_gate_resume(state) and state.get("plan"):
+            report = _node_report(
+                "planner",
+                "Planner resumed an approved human gate using the saved plan.",
+                status="running",
+                needs_human=False,
+                data={"human_gate_id": state.get("approved_human_gate_id", "")},
+            )
+            return {
+                **state,
+                "current_step": state.get("current_step", 0),
+                "status": "running",
+                "needs_human": False,
+                "human_gate_reason": "",
+                "node_reports": _append_node_report(state, report),
+                "trace_events": _append_event(
+                    state,
+                    TraceEvent(event_type="planner", content=report["summary"], ok=True),
+                ),
+            }
+
         if state.get("needs_human"):
             report = _node_report(
                 "planner",
@@ -257,7 +306,7 @@ Return only JSON:
 Rules:
 - Use at most five steps.
 - For high risk, status must be need_user and plan must ask for confirmation.
-- For medium-risk repo changes, plan an isolated branch and explicitly do not merge it to main automatically.
+- For medium-risk repo changes, plan ensure_work_branch, use an isolated branch, and explicitly do not merge it to main automatically.
 - For "belongs to which project" or work-record matching, include search_work_record_vectors or capture_work_message in the plan description.
 - For route=codex, include create_work_task, rewrite_task_for_codex, test_codex_connectivity, and then delegation with the first usable command in priority order: codex-proxy-anyrouter, codex-proxy-cccx, codex.
 """,
@@ -343,6 +392,7 @@ def _executor_node(executor: Any, settings: Settings):
             }
 
         answer = _message_content_to_text(result["messages"][-1].content)
+        tool_trace_events = _trace_events_from_executor_messages(result.get("messages", []))
         human_gate_reason = _executor_human_gate_reason(answer)
         status: WorkflowStatus = "need_user" if human_gate_reason else "running"
         report = _node_report(
@@ -364,7 +414,7 @@ def _executor_node(executor: Any, settings: Settings):
             "needs_human": bool(human_gate_reason),
             "human_gate_reason": human_gate_reason,
             "trace_events": _append_event(
-                state,
+                {**state, "trace_events": [*state.get("trace_events", []), *tool_trace_events]},
                 TraceEvent(event_type="executor", content=answer, ok=True),
             ),
         }
@@ -515,12 +565,22 @@ Use retry_target="finalizer" only when retrying would not help.
         if state.get("needs_human"):
             retry_target = "finalizer"
         retry_status: WorkflowStatus = "failed" if retry_target == "finalizer" else "running"
+        memory_id = store_reflection_memory(
+            task_type=state.get("task_type", ""),
+            failure_type=failure_type,
+            reflection=reflection,
+            created_from_trace_id=str(state.get("trace_id", "")),
+        )
         report = _node_report(
             "reflector",
             reflection,
             status=retry_status,
             needs_human=False,
-            data={"failure_type": failure_type, "retry_target": retry_target},
+            data={
+                "failure_type": failure_type,
+                "retry_target": retry_target,
+                "reflection_memory_id": memory_id,
+            },
         )
         return {
             **state,
@@ -567,16 +627,26 @@ Do not invent tool results. Preserve required human gate prompts when needs_huma
             fallback={"final_answer": fallback_answer, "status": state.get("status", "done")},
         )
         answer = str(payload.get("final_answer") or fallback_answer)
+        human_gate_id = state.get("human_gate_id", "")
+        if state.get("needs_human") and not human_gate_id:
+            human_gate_id = create_human_gate_request(
+                user_input=state.get("user_input", ""),
+                reason=state.get("human_gate_reason", ""),
+                state={**state, "final_answer": answer},
+            )
+            answer = f"{answer}\n\nhuman_gate_id: {human_gate_id}"
         report = _node_report(
             "finalizer",
             answer,
             status=state.get("status", "done"),
             needs_human=state.get("needs_human", False),
             human_gate_reason=state.get("human_gate_reason", ""),
+            data={"human_gate_id": human_gate_id} if human_gate_id else None,
         )
         return {
             **state,
             "final_answer": answer,
+            "human_gate_id": human_gate_id,
             "node_reports": _append_node_report(state, report),
             "trace_events": _append_event(
                 state,
@@ -704,7 +774,7 @@ def build_plan(
     if risk == "medium":
         steps.insert(
             0,
-            "Use an isolated branch or approval-safe workflow before repo changes; do not merge it to main automatically.",
+            "Call ensure_work_branch before repo changes, use an isolated branch, and do not merge it to main automatically.",
         )
     if difficulty == "high" and route != "codex":
         steps.append("Run verifier checks and record failures for reflection if needed.")
@@ -762,18 +832,34 @@ def _executor_prompt(state: AgentState) -> str:
         "Plan:",
         _format_plan(state.get("plan", [])),
         "",
-        "Reflections from prior failed attempts:",
-        _format_reflections(state.get("reflections", [])),
-        "",
-        "Human gate policy:",
+            "Reflections from prior failed attempts:",
+            _format_reflections(state.get("reflections", [])),
+            "",
+            _persistent_reflection_context(state),
+            "",
+            "Human gate policy:",
         "- Default to no human approval unless needs_human is justified.",
         "- Do not merge an isolated branch back to main automatically.",
+        "- For medium-risk repo work, call ensure_work_branch before changing files.",
         "",
         "Codex delegation policy:",
         _codex_delegation_policy_text(),
         "",
         "Execute this plan and return the final user-facing answer.",
     ]
+    if _is_human_gate_resume(state):
+        lines.insert(
+            1,
+            "\n".join(
+                [
+                    "",
+                    "Approved human gate:",
+                    f"- gate_id: {state.get('approved_human_gate_id', '')}",
+                    f"- reason: {state.get('approved_human_gate_reason', '')}",
+                    f"- response: {state.get('human_gate_response', '')}",
+                ]
+            ),
+        )
     return "\n".join(lines)
 
 
@@ -787,6 +873,8 @@ def _planner_user_prompt(state: AgentState, fallback_plan: list[dict[str, Any]])
             "",
             "Reflections from prior failed attempts:",
             _format_reflections(state.get("reflections", [])),
+            "",
+            _persistent_reflection_context(state),
             "",
             "Fallback plan for reference:",
             _format_plan(fallback_plan),
@@ -804,6 +892,8 @@ def _verifier_user_prompt(state: AgentState) -> str:
             "",
             "Plan:",
             _format_plan(state.get("plan", [])),
+            "",
+            _persistent_reflection_context(state),
             "",
             f"Executor final answer:\n{state.get('final_answer', '')}",
             "",
@@ -878,6 +968,22 @@ def _format_reflections(reflections: list[str]) -> str:
     return "\n".join(f"- {reflection}" for reflection in reflections[-3:])
 
 
+def _persistent_reflection_context(state: AgentState) -> str:
+    try:
+        context = reflection_memory_context(
+            query=state.get("user_input", ""),
+            task_type=state.get("task_type", ""),
+            limit=3,
+        )
+    except Exception:
+        return "Relevant reflection memories: (unavailable)"
+    return context or "Relevant reflection memories: (none)"
+
+
+def _is_human_gate_resume(state: AgentState) -> bool:
+    return bool(state.get("approved_human_gate_id"))
+
+
 def _codex_command_names() -> str:
     return ",".join(CODEX_COMMAND_PRIORITY)
 
@@ -920,6 +1026,35 @@ def _format_node_reports(reports: list[dict[str, Any]]) -> str:
 
 def _append_event(state: AgentState, event: TraceEvent) -> list[TraceEvent]:
     return [*state.get("trace_events", []), event]
+
+
+def _trace_events_from_executor_messages(messages: list[Any]) -> list[TraceEvent]:
+    events: list[TraceEvent] = []
+    for message in messages:
+        for call in getattr(message, "tool_calls", None) or []:
+            if not isinstance(call, dict):
+                continue
+            name = str(call.get("name") or "")
+            args = call.get("args") if isinstance(call.get("args"), dict) else {}
+            events.append(
+                TraceEvent(
+                    event_type="tool_call",
+                    tool=name,
+                    args=args,
+                    ok=None,
+                )
+            )
+        if getattr(message, "type", "") == "tool":
+            name = str(getattr(message, "name", "") or getattr(message, "tool_call_id", ""))
+            events.append(
+                TraceEvent(
+                    event_type="tool_result",
+                    tool=name,
+                    content=_message_content_to_text(getattr(message, "content", "")),
+                    ok=True,
+                )
+            )
+    return events
 
 
 def _node_report(

@@ -9,6 +9,12 @@ from langgraph.prebuilt import create_react_agent
 from agent_project.config import Settings, load_settings
 from agent_project.llms import build_chat_model
 from agent_project.tools import get_tools
+from agent_project.tools.human_gate import (
+    approve_human_gate_record,
+    build_human_gate_resume_state,
+    mark_human_gate_completed,
+    mark_human_gate_resumed,
+)
 from agent_project.tools.memory import recent_memory_context
 from agent_project.tools.skills import skill_catalog_text
 from agent_project.tracing import TraceEvent, TraceStore
@@ -136,7 +142,7 @@ def invoke_agent(user_input: str, settings: Settings | None = None) -> str:
     trace.start(user_input=user_input, model=_model_name(settings))
     try:
         result = agent.invoke(
-            {"messages": [HumanMessage(content=user_input)]},
+            {"messages": [HumanMessage(content=user_input)], "trace_id": trace.trace_id},
             config={"recursion_limit": settings.agent_recursion_limit},
         )
     except GraphRecursionError:
@@ -157,6 +163,53 @@ def invoke_agent(user_input: str, settings: Settings | None = None) -> str:
     answer = result.get("final_answer") or message_content_to_text(result["messages"][-1].content)
     trace.finish(answer, success=True)
     return answer
+
+
+def resume_human_gate(gate_id: str, response: str = "approved", settings: Settings | None = None) -> str:
+    settings = settings or load_settings()
+    ok, message = approve_human_gate_record(gate_id, response=response)
+    if not ok:
+        return message
+
+    resume_state = build_human_gate_resume_state(gate_id, response=response)
+    user_input = str(resume_state.get("user_input") or "")
+    if not user_input:
+        user_input = f"Resume approved human gate {gate_id.strip()}."
+
+    agent = build_agent(settings)
+    trace = TraceStore()
+    trace.start(user_input=f"[human_gate_resume:{gate_id.strip()}] {user_input}", model=_model_name(settings))
+    mark_human_gate_resumed(gate_id)
+    try:
+        result = agent.invoke(
+            {
+                **resume_state,
+                "messages": [HumanMessage(content=user_input)],
+                "trace_id": trace.trace_id,
+            },
+            config={"recursion_limit": settings.agent_recursion_limit},
+        )
+    except GraphRecursionError:
+        answer = (
+            "Agent stopped while resuming the approved human gate because it reached "
+            f"AGENT_RECURSION_LIMIT={settings.agent_recursion_limit}."
+        )
+        trace.finish(answer, success=False, error_type="GraphRecursionError")
+        mark_human_gate_completed(gate_id, status="resume_failed")
+        return answer
+    except Exception as exc:
+        trace.add_event(TraceEvent(event_type="error", content=str(exc), ok=False))
+        trace.finish("", success=False, error_type=type(exc).__name__)
+        mark_human_gate_completed(gate_id, status="resume_failed")
+        raise
+
+    for event in result.get("trace_events", []):
+        trace.add_event(event)
+    answer = result.get("final_answer") or message_content_to_text(result["messages"][-1].content)
+    success = result.get("status") != "failed"
+    trace.finish(answer, success=success, error_type="" if success else str(result.get("error_type", "")))
+    mark_human_gate_completed(gate_id, status="completed" if success else "resume_failed")
+    return f"{message}\n\n{answer}"
 
 
 def _model_name(settings: Settings) -> str:

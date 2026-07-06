@@ -7,15 +7,19 @@ from agent_project.workflow import (
     _codex_delegation_policy_text,
     _executor_human_gate_reason,
     _executor_prompt,
+    _planner_node,
     _parse_json_object,
     _reflector_node,
     _retry_target_for_failure,
+    _router_node,
     _router_human_gate_reason,
+    _trace_events_from_executor_messages,
     _verifier_node,
     build_plan,
     classify_route_risk_difficulty,
     classify_task_type,
 )
+from langchain_core.messages import AIMessage, ToolMessage
 
 
 class _FakeJsonModel:
@@ -104,6 +108,26 @@ def test_executor_prompt_includes_codex_connectivity_priority() -> None:
     assert "codex_command" in prompt
 
 
+def test_executor_prompt_includes_approved_human_gate_context() -> None:
+    prompt = _executor_prompt(
+        {
+            "user_input": "继续高风险任务",
+            "task_type": "code_task",
+            "route": "ask_user",
+            "risk": "high",
+            "difficulty": "high",
+            "plan": [{"step": 1, "action": "ask_user", "description": "confirm"}],
+            "approved_human_gate_id": "gate-1",
+            "approved_human_gate_reason": "high risk",
+            "human_gate_response": "approved by operator",
+        }
+    )
+
+    assert "Approved human gate" in prompt
+    assert "gate-1" in prompt
+    assert "approved by operator" in prompt
+
+
 def test_codex_delegation_policy_uses_expected_priority() -> None:
     policy = _codex_delegation_policy_text()
 
@@ -128,6 +152,32 @@ def test_workflow_plan_stops_high_risk_requests_for_confirmation() -> None:
             "description": "Request confirmation before high-risk work.",
         }
     ]
+
+
+def test_human_gate_resume_reuses_saved_route_and_plan() -> None:
+    state = {
+        "user_input": "删除线上数据库前已获得审批。",
+        "task_type": "code_task",
+        "route": "ask_user",
+        "risk": "high",
+        "difficulty": "high",
+        "plan": [{"step": 1, "action": "ask_user", "description": "confirm high risk"}],
+        "status": "need_user",
+        "needs_human": True,
+        "human_gate_reason": "high risk",
+        "approved_human_gate_id": "gate-1",
+        "approved_human_gate_reason": "high risk",
+        "human_gate_response": "approved",
+    }
+
+    routed = _router_node(_FakeJsonModel("{}"))(state)
+    planned = _planner_node(_FakeJsonModel("{}"))(routed)
+
+    assert routed["status"] == "running"
+    assert routed["needs_human"] is False
+    assert planned["status"] == "running"
+    assert planned["needs_human"] is False
+    assert planned["plan"] == state["plan"]
 
 
 def test_parse_json_object_accepts_fenced_json() -> None:
@@ -210,6 +260,21 @@ def test_reflector_routes_executor_failures_back_to_executor() -> None:
     assert _after_reflector(state) == "executor"
 
 
+def test_reflector_persists_reflection_memory(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("AGENT_STATE_DB_PATH", str(tmp_path / "agent.sqlite3"))
+    reflector = _reflector_node(
+        _FakeJsonModel(
+            '{"reflection": "Use the file search tool before answering.", '
+            '"failure_type": "missing_context"}'
+        )
+    )
+
+    state = reflector({"status": "failed", "task_type": "file_task", "tool_results": []})
+
+    report = state["node_reports"][-1]
+    assert report["data"]["reflection_memory_id"] > 0
+
+
 def test_reflector_honors_explicit_finalizer_retry_target() -> None:
     reflector = _reflector_node(
         _FakeJsonModel(
@@ -230,6 +295,30 @@ def test_retry_target_for_failure_defaults_to_reasonable_node() -> None:
     assert _retry_target_for_failure("wrong_tool") == "executor"
     assert _retry_target_for_failure("unknown", "route and scope were wrong") == "planner"
     assert _retry_target_for_failure("unknown", "tool args failed") == "executor"
+
+
+def test_trace_events_from_executor_messages_extracts_tool_calls() -> None:
+    messages = [
+        AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "search_knowledge",
+                    "args": {"query": "agent tracing"},
+                    "id": "call-1",
+                    "type": "tool_call",
+                }
+            ],
+        ),
+        ToolMessage(content="result text", name="search_knowledge", tool_call_id="call-1"),
+    ]
+
+    events = _trace_events_from_executor_messages(messages)
+
+    assert [event.event_type for event in events] == ["tool_call", "tool_result"]
+    assert events[0].tool == "search_knowledge"
+    assert events[0].args == {"query": "agent tracing"}
+    assert events[1].content == "result text"
 
 
 def test_coerce_plan_limits_and_normalizes_steps() -> None:

@@ -9,7 +9,7 @@ from langchain_core.messages import HumanMessage
 from langchain_core.messages import AIMessage
 from langgraph.errors import GraphRecursionError
 
-from agent_project.agent import build_agent, invoke_agent, message_content_to_text
+from agent_project.agent import build_agent, invoke_agent, message_content_to_text, resume_human_gate
 from agent_project.config import load_settings
 from agent_project.sessions import (
     AgentSession,
@@ -20,6 +20,7 @@ from agent_project.sessions import (
     list_sessions,
     load_session_messages,
 )
+from agent_project.tools.human_gate import approve_human_gate, list_human_gates
 from agent_project.tracing import TraceEvent, TraceStore
 
 
@@ -34,7 +35,7 @@ def _stream_agent_response(
     latest_messages = messages
     try:
         for stream_mode, chunk in agent.stream(
-            {"messages": messages},
+            {"messages": messages, "trace_id": trace.trace_id if trace else ""},
             config={"recursion_limit": recursion_limit},
             stream_mode=["messages", "values"],
         ):
@@ -199,6 +200,32 @@ def list_saved_sessions(include_all: bool = False) -> None:
 
 def main() -> None:
     argv = sys.argv[1:]
+    if argv and argv[0] == "human-gates":
+        parser = argparse.ArgumentParser(description="List saved human gate approval requests.")
+        parser.add_argument("--status", default="pending", help="Gate status to list.")
+        parser.add_argument("--limit", type=int, default=20, help="Maximum rows to show.")
+        args = parser.parse_args(argv[1:])
+        load_settings()
+        print(list_human_gates.invoke({"status": args.status, "limit": args.limit}))
+        return
+
+    if argv and argv[0] == "approve":
+        parser = argparse.ArgumentParser(description="Approve and resume a saved human gate.")
+        parser.add_argument("gate_id", help="Human gate ID.")
+        parser.add_argument("--response", default="approved", help="Approval note to pass to the agent.")
+        parser.add_argument(
+            "--no-resume",
+            action="store_true",
+            help="Only approve the gate; do not resume the saved workflow.",
+        )
+        args = parser.parse_args(argv[1:])
+        settings = load_settings()
+        if args.no_resume:
+            print(approve_human_gate.invoke({"gate_id": args.gate_id, "response": args.response}))
+        else:
+            print(resume_human_gate(args.gate_id, response=args.response, settings=settings))
+        return
+
     if argv and argv[0] == "resume":
         parser = argparse.ArgumentParser(description="Resume a saved interactive session.")
         parser.add_argument("session_id", nargs="?", help="Session ID or unique prefix.")
@@ -239,7 +266,8 @@ def main() -> None:
         description="Run the LangGraph agent.",
         epilog=(
             "Session commands: agent-chat resume [--last|--all] [session_id], "
-            "agent-chat sessions [--all]"
+            "agent-chat sessions [--all], agent-chat human-gates [--status pending], "
+            "agent-chat approve <gate_id>"
         ),
     )
     parser.add_argument("message", nargs="*", help="Optional one-shot message.")

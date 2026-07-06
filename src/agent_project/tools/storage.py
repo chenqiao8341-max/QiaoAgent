@@ -255,5 +255,60 @@ def _initialize(connection: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_agent_trace_events_trace
             ON agent_trace_events(trace_id, event_index);
+
+        CREATE TABLE IF NOT EXISTS human_gate_requests (
+            gate_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL DEFAULT 'pending',
+            user_input TEXT NOT NULL DEFAULT '',
+            reason TEXT NOT NULL DEFAULT '',
+            state_json TEXT NOT NULL DEFAULT '{}',
+            response TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            resolved_at TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_human_gate_requests_status_created
+            ON human_gate_requests(status, created_at);
+
+        CREATE TABLE IF NOT EXISTS knowledge_sources (
+            source_id TEXT PRIMARY KEY,
+            source_type TEXT NOT NULL,
+            path TEXT NOT NULL DEFAULT '',
+            url TEXT NOT NULL DEFAULT '',
+            title TEXT NOT NULL DEFAULT '',
+            content_hash TEXT NOT NULL DEFAULT '',
+            mtime REAL,
+            permissions TEXT NOT NULL DEFAULT 'default',
+            indexed_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_knowledge_sources_type_path
+            ON knowledge_sources(source_type, path);
+
+        CREATE TABLE IF NOT EXISTS knowledge_chunks (
+            chunk_id TEXT PRIMARY KEY,
+            source_id TEXT NOT NULL,
+            source_type TEXT NOT NULL,
+            path TEXT NOT NULL DEFAULT '',
+            url TEXT NOT NULL DEFAULT '',
+            title TEXT NOT NULL DEFAULT '',
+            heading_path TEXT NOT NULL DEFAULT '',
+            citation_id TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            mtime REAL,
+            text TEXT NOT NULL,
+            embedding_model TEXT NOT NULL DEFAULT '',
+            embedding_json TEXT NOT NULL DEFAULT '',
+            permissions TEXT NOT NULL DEFAULT 'default',
+            indexed_at TEXT NOT NULL,
+            FOREIGN KEY (source_id) REFERENCES knowledge_sources(source_id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_source
+            ON knowledge_chunks(source_id);
+
+        CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_citation
+            ON knowledge_chunks(citation_id);
         """
     )

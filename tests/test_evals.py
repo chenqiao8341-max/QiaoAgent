@@ -4,8 +4,9 @@ import json
 
 from agent_project.evals.dataset import load_dataset
 from agent_project.evals.metrics import score_example, summarize_results
-from agent_project.evals.runner import run_eval
+from agent_project.evals.runner import run_eval, run_live_eval
 from agent_project.evals.schemas import EvalExample
+from agent_project.tracing import TraceEvent, TraceStore
 
 
 def test_eval_metrics_score_expected_fields() -> None:
@@ -54,3 +55,43 @@ def test_eval_runner_writes_json_report(tmp_path) -> None:
     assert summary["count"] == 1
     assert payload["summary"]["route_accuracy"] == 1.0
     assert load_dataset(dataset_path)[0].id == "case-1"
+
+
+def test_live_eval_invokes_agent_and_scores_trace(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("AGENT_STATE_DB_PATH", str(tmp_path / "agent.sqlite3"))
+    dataset_path = tmp_path / "dataset.jsonl"
+    report_path = tmp_path / "report.json"
+    dataset_path.write_text(
+        EvalExample(
+            id="case-live",
+            category="route",
+            input="route this live case",
+            expected_route="self",
+            expected_tools=["search_knowledge"],
+            expected_answer_contains=["done"],
+        ).model_dump_json()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    def fake_invoke(user_input: str) -> str:
+        trace = TraceStore()
+        trace.start(user_input=user_input, model="fake")
+        trace.add_event(TraceEvent(event_type="router", content="task_type=chat route=self"))
+        trace.add_event(
+            TraceEvent(
+                event_type="tool_call",
+                tool="search_knowledge",
+                args={"query": "x"},
+                ok=True,
+            )
+        )
+        trace.finish("done", success=True)
+        return "done"
+
+    summary = run_live_eval(dataset_path, report_path, invoke_fn=fake_invoke)
+    payload = json.loads(report_path.read_text(encoding="utf-8"))
+
+    assert summary["route_accuracy"] == 1.0
+    assert summary["tool_call_accuracy"] == 1.0
+    assert payload["summary"]["task_success_rate"] == 1.0

@@ -116,6 +116,82 @@ def delete_memory(memory_id: int) -> str:
     return f"Deleted memory {memory_id}."
 
 
+def store_reflection_memory(
+    *,
+    task_type: str,
+    failure_type: str,
+    reflection: str,
+    created_from_trace_id: str = "",
+) -> int:
+    text = reflection.strip()
+    if not text:
+        return 0
+    namespace = "reflections"
+    source = created_from_trace_id.strip()
+    tags = ",".join(
+        part
+        for part in [
+            f"task_type:{task_type.strip() or 'unknown'}",
+            f"failure_type:{failure_type.strip() or 'unknown'}",
+        ]
+        if part
+    )
+    now = _now()
+    with connect() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO memories(namespace, content, source, tags, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (namespace, text, source, tags, now, now),
+        )
+        return int(cursor.lastrowid or 0)
+
+
+def reflection_memory_context(query: str, task_type: str = "", limit: int = 3) -> str:
+    clean_query = query.strip()
+    clean_task_type = task_type.strip()
+    limit = max(1, min(limit, 10))
+    patterns = [f"%{clean_query}%"] if clean_query else []
+    if clean_task_type:
+        patterns.append(f"%task_type:{clean_task_type}%")
+
+    with connect() as connection:
+        if patterns:
+            clauses = " OR ".join("(content LIKE ? OR tags LIKE ?)" for _pattern in patterns)
+            params: list[str | int] = []
+            for pattern in patterns:
+                params.extend([pattern, pattern])
+            params.append(limit)
+            rows = connection.execute(
+                f"""
+                SELECT * FROM memories
+                WHERE namespace = 'reflections'
+                  AND ({clauses})
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        else:
+            rows = connection.execute(
+                """
+                SELECT * FROM memories
+                WHERE namespace = 'reflections'
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+
+    if not rows:
+        return ""
+    lines = ["Relevant reflection memories:"]
+    for row in rows:
+        lines.append(f"- [{row['id']}] {row['tags']}: {row['content']}")
+    return "\n".join(lines)
+
+
 
 def recent_memory_context(namespace: str = "default", limit: int = 5) -> str:
     namespace = _clean_namespace(namespace)

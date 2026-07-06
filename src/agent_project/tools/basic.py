@@ -38,7 +38,16 @@ from agent_project.tools.goals import (
     run_agent_goal_cycle,
     update_agent_goal,
 )
+from agent_project.tools.git_safety import ensure_work_branch
+from agent_project.tools.human_gate import approve_human_gate, list_human_gates
 from agent_project.tools.memory import delete_memory, get_memory, remember_memory, search_memories
+from agent_project.tools.project_context import load_project_context
+from agent_project.tools.rag import (
+    answer_with_citations,
+    index_documents,
+    search_knowledge,
+    verify_answer_citations,
+)
 from agent_project.tools.shell import execute_shell_command
 from agent_project.tools.skills import list_skills, read_skill, read_skill_file
 from agent_project.tools.web import web_search
@@ -146,6 +155,9 @@ def get_tools():
         list_agent_goals,
         create_self_improvement_codex_prompt,
         run_agent_goal_cycle,
+        ensure_work_branch,
+        list_human_gates,
+        approve_human_gate,
         record_task_difficulty_judgment,
         create_codex_review_packet,
         start_codex_review,
@@ -154,6 +166,11 @@ def get_tools():
         search_memories,
         get_memory,
         delete_memory,
+        load_project_context,
+        index_documents,
+        search_knowledge,
+        answer_with_citations,
+        verify_answer_citations,
         list_skills,
         read_skill,
         read_skill_file,
