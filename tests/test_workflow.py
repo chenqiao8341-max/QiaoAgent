@@ -7,6 +7,8 @@ from agent_project.workflow import (
     _codex_delegation_policy_text,
     _executor_human_gate_reason,
     _executor_prompt,
+    _executor_step_prompt,
+    _policy_violation_from_trace_events,
     _planner_node,
     _parse_json_object,
     _reflector_node,
@@ -135,6 +137,41 @@ def test_executor_prompt_includes_codex_connectivity_priority() -> None:
     assert "codex-proxy-anyrouter" in prompt
     assert "codex-proxy-cccx" in prompt
     assert "codex_command" in prompt
+
+
+def test_executor_step_prompt_limits_context_to_one_plan_step() -> None:
+    state = {
+        "user_input": "处理工作消息",
+        "task_type": "work_message",
+        "route": "self",
+        "risk": "low",
+        "difficulty": "low",
+        "plan": [
+            {"step": 1, "action": "route_work", "description": "Capture message."},
+            {"step": 2, "action": "execute", "description": "Summarize result."},
+        ],
+    }
+
+    prompt = _executor_step_prompt(state, state["plan"][0], step_index=0)
+
+    assert "Current step 1/2" in prompt
+    assert "Capture message." in prompt
+    assert "Summarize result." not in prompt
+    assert "Allowed tools:" in prompt
+    assert "capture_work_message" in prompt
+    assert "execute_shell_command" not in prompt
+
+
+def test_policy_violation_from_trace_events_counts_tool_calls() -> None:
+    state = {"task_type": "work_message", "route": "self"}
+    events = [
+        type("Event", (), {"event_type": "tool_call"})()
+        for _ in range(7)
+    ]
+
+    violation = _policy_violation_from_trace_events(state, events, elapsed_seconds=1.0)
+
+    assert "tool call budget" in violation
 
 
 def test_executor_prompt_includes_approved_human_gate_context() -> None:

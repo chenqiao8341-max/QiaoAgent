@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import Any, Literal, TypedDict
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -9,8 +10,9 @@ from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import create_react_agent
 
 from agent_project.config import Settings
+from agent_project.execution_policy import policy_for_task, task_policy_violation
 from agent_project.llms import build_chat_model
-from agent_project.tools import get_tools
+from agent_project.tools import get_tools_for_task
 from agent_project.tools.human_gate import create_human_gate_request
 from agent_project.tools.memory import reflection_memory_context, store_reflection_memory
 from agent_project.tools.rag import rag_search_trace_event, search_knowledge_records
@@ -36,6 +38,7 @@ class AgentState(TypedDict, total=False):
     project_confidence: float
     plan: list[dict[str, Any]]
     current_step: int
+    step_results: list[dict[str, Any]]
     tool_results: list[dict[str, Any]]
     reflections: list[str]
     final_answer: str
@@ -89,13 +92,11 @@ Produce a concise user-facing answer with the result, important assumptions, and
 
 def build_workflow_agent(settings: Settings, system_prompt: str):
     model = build_chat_model(settings)
-    tools = get_tools()
-    executor = _build_react_executor(model, tools, f"{system_prompt}\n\n{EXECUTOR_PROMPT}")
 
     graph = StateGraph(AgentState)
     graph.add_node("router", _router_node(model))
     graph.add_node("planner", _planner_node(model))
-    graph.add_node("executor", _executor_node(executor, settings))
+    graph.add_node("executor", _executor_node(model, settings, system_prompt))
     graph.add_node("verifier", _verifier_node(model))
     graph.add_node("reflector", _reflector_node(model))
     graph.add_node("finalizer", _finalizer_node(model))
@@ -379,55 +380,108 @@ Rules:
     return run
 
 
-def _executor_node(executor: Any, settings: Settings):
+def _executor_node(model: Any, settings: Settings, system_prompt: str):
     def run(state: AgentState) -> AgentState:
         if state.get("status") == "need_user":
             return state
 
-        prompt = _executor_prompt(state)
-        try:
-            result = executor.invoke(
-                {"messages": [HumanMessage(content=prompt)]},
-                config={"recursion_limit": settings.agent_recursion_limit},
+        started = time.monotonic()
+        tool_trace_events: list[TraceEvent] = []
+        step_results: list[dict[str, Any]] = []
+        answer = ""
+        status: WorkflowStatus = "running"
+        error_type = ""
+
+        tools = get_tools_for_task(state.get("task_type", "chat"), state.get("route", "self"))
+        executor = _build_react_executor(model, tools, f"{system_prompt}\n\n{EXECUTOR_PROMPT}")
+        plan = state.get("plan", []) or [{"step": 1, "action": "execute", "description": "Answer directly."}]
+
+        for index, step in enumerate(plan):
+            violation = _policy_violation_from_trace_events(
+                state,
+                tool_trace_events,
+                elapsed_seconds=time.monotonic() - started,
             )
-        except Exception as exc:
+            if violation:
+                status = "failed"
+                error_type = "TaskExecutionPolicy"
+                answer = violation
+                break
+
+            prompt = _executor_step_prompt(state, step, step_index=index)
+            try:
+                result = executor.invoke(
+                    {"messages": [HumanMessage(content=prompt)]},
+                    config={"recursion_limit": settings.agent_recursion_limit},
+                )
+            except Exception as exc:
+                status = "failed"
+                error_type = type(exc).__name__
+                answer = str(exc)
+                step_results.append(
+                    {
+                        "step": step.get("step", index + 1),
+                        "ok": False,
+                        "content": answer,
+                        "error_type": error_type,
+                    }
+                )
+                break
+
+            step_answer = _message_content_to_text(result["messages"][-1].content)
+            answer = step_answer
+            step_events = _trace_events_from_executor_messages(result.get("messages", []))
+            if state.get("retrieval_needed") or state.get("task_type") == "rag_qa":
+                step_events.extend(_rag_trace_events_from_tool_results(state, result.get("messages", [])))
+            tool_trace_events.extend(step_events)
+            step_results.append(
+                {
+                    "step": step.get("step", index + 1),
+                    "action": step.get("action", "execute"),
+                    "ok": True,
+                    "content": step_answer,
+                }
+            )
+
+        if status == "failed":
             report = _node_report(
                 "executor",
-                str(exc),
+                answer,
                 status="failed",
                 needs_human=False,
-                data={"error_type": type(exc).__name__},
+                data={"error_type": error_type, "step_results": step_results},
             )
             return {
                 **state,
                 "status": "failed",
-                "error_type": type(exc).__name__,
+                "error_type": error_type,
+                "current_step": len(step_results),
+                "step_results": [*state.get("step_results", []), *step_results],
                 "tool_results": [
                     *state.get("tool_results", []),
-                    {"ok": False, "content": str(exc)},
+                    {"ok": False, "content": answer},
                 ],
                 "node_reports": _append_node_report(state, report),
                 "trace_events": _append_event(
-                    state,
-                    TraceEvent(event_type="executor", content=str(exc), ok=False),
+                    {**state, "trace_events": [*state.get("trace_events", []), *tool_trace_events]},
+                    TraceEvent(event_type="executor", content=answer, ok=False),
                 ),
             }
 
-        answer = _message_content_to_text(result["messages"][-1].content)
-        tool_trace_events = _trace_events_from_executor_messages(result.get("messages", []))
-        if state.get("retrieval_needed") or state.get("task_type") == "rag_qa":
-            tool_trace_events.extend(_rag_trace_events_from_tool_results(state, result.get("messages", [])))
         human_gate_reason = _executor_human_gate_reason(answer)
-        status: WorkflowStatus = "need_user" if human_gate_reason else "running"
+        status = "need_user" if human_gate_reason else "running"
         report = _node_report(
             "executor",
             answer,
             status=status,
             needs_human=bool(human_gate_reason),
             human_gate_reason=human_gate_reason,
+            data={"step_results": step_results},
         )
         return {
             **state,
+            "current_step": len(step_results),
+            "step_results": [*state.get("step_results", []), *step_results],
             "tool_results": [
                 *state.get("tool_results", []),
                 {"ok": True, "content": answer},
@@ -895,6 +949,31 @@ def _executor_prompt(state: AgentState) -> str:
     return "\n".join(lines)
 
 
+def _executor_step_prompt(state: AgentState, step: dict[str, Any], step_index: int) -> str:
+    plan = state.get("plan", [])
+    policy = policy_for_task(state.get("task_type", "chat"), state.get("route", "self"))
+    prior_results = state.get("step_results", [])
+    return "\n".join(
+        [
+            f"User request:\n{state.get('user_input', '')}",
+            "",
+            f"Router: task_type={state.get('task_type')} route={state.get('route')} "
+            f"risk={state.get('risk')} difficulty={state.get('difficulty')}",
+            f"Execution policy: max_tool_calls={policy.max_tool_calls} max_seconds={policy.max_seconds}",
+            "Allowed tools: " + ", ".join(sorted(policy.allowed_tools)),
+            "",
+            f"Current step {step_index + 1}/{max(len(plan), 1)}:",
+            f"{step.get('step', step_index + 1)}. [{step.get('action', 'execute')}] {step.get('description', '')}",
+            "",
+            "Prior step results:",
+            _format_step_results(prior_results),
+            "",
+            "Execute only the current step. Do not perform later plan steps.",
+            "Return the current step result and any user-facing conclusion if this is the final step.",
+        ]
+    )
+
+
 def _planner_user_prompt(state: AgentState, fallback_plan: list[dict[str, Any]]) -> str:
     return "\n".join(
         [
@@ -1002,6 +1081,21 @@ def _format_reflections(reflections: list[str]) -> str:
     return "\n".join(f"- {reflection}" for reflection in reflections[-3:])
 
 
+def _format_step_results(results: list[dict[str, Any]]) -> str:
+    if not results:
+        return "(none)"
+    lines = []
+    for result in results[-5:]:
+        content = str(result.get("content", "")).replace("\n", " ")
+        if len(content) > 500:
+            content = content[:500].rstrip() + "..."
+        lines.append(
+            f"- step={result.get('step', '')} ok={result.get('ok', False)} "
+            f"action={result.get('action', '')} result={content}"
+        )
+    return "\n".join(lines)
+
+
 def _persistent_reflection_context(state: AgentState) -> str:
     try:
         context = reflection_memory_context(
@@ -1060,6 +1154,20 @@ def _format_node_reports(reports: list[dict[str, Any]]) -> str:
 
 def _append_event(state: AgentState, event: TraceEvent) -> list[TraceEvent]:
     return [*state.get("trace_events", []), event]
+
+
+def _policy_violation_from_trace_events(
+    state: AgentState,
+    events: list[TraceEvent],
+    elapsed_seconds: float,
+) -> str:
+    policy = policy_for_task(state.get("task_type", "chat"), state.get("route", "self"))
+    tool_call_count = sum(1 for event in events if event.event_type == "tool_call")
+    return task_policy_violation(
+        policy,
+        tool_call_count=tool_call_count,
+        elapsed_seconds=elapsed_seconds,
+    )
 
 
 def _trace_events_from_executor_messages(messages: list[Any]) -> list[TraceEvent]:

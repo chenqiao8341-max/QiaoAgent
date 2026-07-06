@@ -188,3 +188,10 @@ def get_tools():
         get_task_queue,
         list_task_queues,
     ]
+
+
+def get_tools_for_task(task_type: str, route: str = "self"):
+    from agent_project.execution_policy import select_tool_names
+
+    allowed = select_tool_names(task_type, route)
+    return [tool for tool in get_tools() if tool.name in allowed]
