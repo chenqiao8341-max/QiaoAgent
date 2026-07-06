@@ -1,12 +1,29 @@
 from __future__ import annotations
 
 from agent_project.workflow import (
+    _after_reflector,
+    _after_verifier,
     _coerce_plan,
+    _codex_delegation_policy_text,
+    _executor_human_gate_reason,
+    _executor_prompt,
     _parse_json_object,
+    _reflector_node,
+    _retry_target_for_failure,
+    _router_human_gate_reason,
+    _verifier_node,
     build_plan,
     classify_route_risk_difficulty,
     classify_task_type,
 )
+
+
+class _FakeJsonModel:
+    def __init__(self, content: str) -> None:
+        self.content = content
+
+    def invoke(self, _messages):
+        return type("FakeMessage", (), {"content": self.content})()
 
 
 def test_workflow_router_classifies_work_message() -> None:
@@ -35,6 +52,66 @@ def test_workflow_router_classifies_high_difficulty_code_task() -> None:
     assert difficulty == "high"
 
 
+def test_workflow_medium_risk_plan_forbids_auto_merge() -> None:
+    plan = build_plan(
+        user_input="修改接口并补测试。",
+        task_type="code_task",
+        route="self",
+        risk="medium",
+        difficulty="low",
+    )
+
+    assert "isolated branch" in plan[0]["description"]
+    assert "do not merge it to main automatically" in plan[0]["description"]
+
+
+def test_workflow_codex_plan_tests_connectivity_before_delegation() -> None:
+    plan = build_plan(
+        user_input="实现全自动化多节点工作流并补测试。",
+        task_type="code_task",
+        route="codex",
+        risk="medium",
+        difficulty="high",
+    )
+    descriptions = "\n".join(step["description"] for step in plan)
+
+    assert "test_codex_connectivity" in descriptions
+    assert "codex-proxy-anyrouter,codex-proxy-cccx,codex" in descriptions
+    assert descriptions.index("test_codex_connectivity") < descriptions.index("Delegate to Codex")
+
+
+def test_executor_prompt_includes_codex_connectivity_priority() -> None:
+    prompt = _executor_prompt(
+        {
+            "user_input": "实现复杂代码任务",
+            "task_type": "code_task",
+            "route": "codex",
+            "risk": "medium",
+            "difficulty": "high",
+            "plan": build_plan(
+                user_input="实现复杂代码任务",
+                task_type="code_task",
+                route="codex",
+                risk="medium",
+                difficulty="high",
+            ),
+        }
+    )
+
+    assert "test_codex_connectivity" in prompt
+    assert "codex-proxy-anyrouter" in prompt
+    assert "codex-proxy-cccx" in prompt
+    assert "codex_command" in prompt
+
+
+def test_codex_delegation_policy_uses_expected_priority() -> None:
+    policy = _codex_delegation_policy_text()
+
+    assert 'command_names="codex-proxy-anyrouter,codex-proxy-cccx,codex"' in policy
+    assert policy.index("codex-proxy-anyrouter") < policy.index("codex-proxy-cccx")
+    assert policy.index("codex-proxy-cccx") < policy.index("codex.")
+
+
 def test_workflow_plan_stops_high_risk_requests_for_confirmation() -> None:
     plan = build_plan(
         user_input="删除线上数据库并 reset --hard。",
@@ -56,6 +133,103 @@ def test_workflow_plan_stops_high_risk_requests_for_confirmation() -> None:
 def test_parse_json_object_accepts_fenced_json() -> None:
     parsed = _parse_json_object('```json\n{"status": "done", "ok": true}\n```')
     assert parsed == {"status": "done", "ok": True}
+
+
+def test_router_low_project_confidence_requires_human_gate() -> None:
+    reason = _router_human_gate_reason("work_message", 0.2)
+
+    assert "project ownership confidence is low" in reason
+    assert _router_human_gate_reason("work_message", 0.8) == ""
+    assert _router_human_gate_reason("chat", 0.1) == ""
+
+
+def test_executor_merge_request_requires_human_gate() -> None:
+    reason = _executor_human_gate_reason("Opened a pull request to merge into main.")
+
+    assert "human approval" in reason
+    assert _executor_human_gate_reason("Created an isolated branch and stopped before merge.") == ""
+
+
+def test_verifier_does_not_request_human_before_failure_threshold() -> None:
+    verifier = _verifier_node(_FakeJsonModel('{"status": "need_user", "ok": false, "reason": "missing"}'))
+
+    state = verifier({"final_answer": "partial", "status": "running", "verifier_failures": 1})
+
+    assert state["status"] == "failed"
+    assert state["verifier_failures"] == 2
+    assert state["needs_human"] is False
+
+
+def test_verifier_treats_done_with_not_ok_as_failure() -> None:
+    verifier = _verifier_node(_FakeJsonModel('{"status": "done", "ok": false, "reason": "not enough"}'))
+
+    state = verifier({"final_answer": "partial", "status": "running", "verifier_failures": 0})
+
+    assert state["status"] == "failed"
+    assert state["verifier_failures"] == 1
+    assert _after_verifier(state) == "reflect"
+
+
+def test_verifier_requests_human_on_third_failure_and_skips_reflector() -> None:
+    verifier = _verifier_node(_FakeJsonModel('{"status": "failed", "ok": false, "reason": "still wrong"}'))
+
+    state = verifier({"final_answer": "partial", "status": "running", "verifier_failures": 2})
+
+    assert state["status"] == "need_user"
+    assert state["verifier_failures"] == 3
+    assert state["needs_human"] is True
+    assert "Verifier failed 3 times" in state["human_gate_reason"]
+    assert _after_verifier(state) == "finalize"
+
+
+def test_reflector_routes_planner_failures_back_to_planner() -> None:
+    reflector = _reflector_node(
+        _FakeJsonModel(
+            '{"reflection": "Need better context before execution.", "failure_type": "missing_context"}'
+        )
+    )
+
+    state = reflector({"status": "failed", "tool_results": []})
+
+    assert state["retry_target"] == "planner"
+    assert state["status"] == "running"
+    assert _after_reflector(state) == "planner"
+
+
+def test_reflector_routes_executor_failures_back_to_executor() -> None:
+    reflector = _reflector_node(
+        _FakeJsonModel(
+            '{"reflection": "The selected tool arguments were wrong.", "failure_type": "bad_tool_args"}'
+        )
+    )
+
+    state = reflector({"status": "failed", "tool_results": []})
+
+    assert state["retry_target"] == "executor"
+    assert state["status"] == "running"
+    assert _after_reflector(state) == "executor"
+
+
+def test_reflector_honors_explicit_finalizer_retry_target() -> None:
+    reflector = _reflector_node(
+        _FakeJsonModel(
+            '{"reflection": "Retrying cannot help without external input.", '
+            '"failure_type": "unknown", "retry_target": "finalizer"}'
+        )
+    )
+
+    state = reflector({"status": "failed", "tool_results": []})
+
+    assert state["retry_target"] == "finalizer"
+    assert state["status"] == "failed"
+    assert _after_reflector(state) == "finalize"
+
+
+def test_retry_target_for_failure_defaults_to_reasonable_node() -> None:
+    assert _retry_target_for_failure("planning_loop") == "planner"
+    assert _retry_target_for_failure("wrong_tool") == "executor"
+    assert _retry_target_for_failure("unknown", "route and scope were wrong") == "planner"
+    assert _retry_target_for_failure("unknown", "tool args failed") == "executor"
 
 
 def test_coerce_plan_limits_and_normalizes_steps() -> None:

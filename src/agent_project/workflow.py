@@ -19,6 +19,8 @@ WorkflowStatus = Literal["running", "need_user", "done", "failed"]
 WorkflowRoute = Literal["self", "codex", "ask_user", "defer"]
 WorkflowRisk = Literal["low", "medium", "high"]
 WorkflowDifficulty = Literal["low", "high"]
+RetryTarget = Literal["planner", "executor", "finalizer"]
+CODEX_COMMAND_PRIORITY = ("codex-proxy-anyrouter", "codex-proxy-cccx", "codex")
 
 
 class AgentState(TypedDict, total=False):
@@ -28,6 +30,7 @@ class AgentState(TypedDict, total=False):
     route: WorkflowRoute
     risk: WorkflowRisk
     difficulty: WorkflowDifficulty
+    project_confidence: float
     plan: list[dict[str, Any]]
     current_step: int
     tool_results: list[dict[str, Any]]
@@ -35,6 +38,11 @@ class AgentState(TypedDict, total=False):
     final_answer: str
     status: WorkflowStatus
     error_type: str
+    node_reports: list[dict[str, Any]]
+    needs_human: bool
+    human_gate_reason: str
+    verifier_failures: int
+    retry_target: RetryTarget
     trace_events: list[TraceEvent]
 
 
@@ -53,13 +61,17 @@ The plan should be executable by the available tools or by Codex delegation."""
 EXECUTOR_PROMPT = """You are the Executor node.
 Execute the plan using available tools. For work messages, capture and route the message first.
 For code/deployment/test-heavy tasks, create a work task and prepare Codex delegation when useful.
+For medium-risk repo work, use an isolated branch and do not merge it back to main automatically.
+Before starting Codex delegation, call test_codex_connectivity with command_names="codex-proxy-anyrouter,codex-proxy-cccx,codex".
+Choose the first usable Codex command in this exact priority order: codex-proxy-anyrouter, codex-proxy-cccx, codex.
+Pass that chosen command with codex_command when calling run_codex_task, start_codex_session, or continue_codex_session.
 Respect approval settings and stop if user confirmation is required."""
 
 VERIFIER_PROMPT = """You are the Verifier node.
 Check whether the result satisfies the user request and whether more tool work or user input is needed."""
 
 REFLECTOR_PROMPT = """You are the Reflector node.
-If the workflow failed, summarize the failure cause and what should be done differently next time."""
+If the workflow failed, summarize the failure cause and decide whether the planner or executor should retry."""
 
 FINALIZER_PROMPT = """You are the Finalizer node.
 Produce a concise user-facing answer with the result, important assumptions, and verification status."""
@@ -97,7 +109,15 @@ def build_workflow_agent(settings: Settings, system_prompt: str):
             "finalize": "finalizer",
         },
     )
-    graph.add_edge("reflector", "finalizer")
+    graph.add_conditional_edges(
+        "reflector",
+        _after_reflector,
+        {
+            "planner": "planner",
+            "executor": "executor",
+            "finalize": "finalizer",
+        },
+    )
     graph.add_edge("finalizer", END)
     return graph.compile()
 
@@ -127,9 +147,11 @@ Return only JSON:
   "route": "self|codex|ask_user|defer",
   "risk": "low|medium|high",
   "difficulty": "low|high",
+  "project_confidence": 0.0,
   "rationale": "short reason"
 }
 Use ask_user for high-risk or underspecified requests. Use codex for complex code/deploy/test work.
+For work_message requests that need project ownership, set project_confidence from 0 to 1.
 """,
             user_prompt=f"Classify this request:\n{user_input}",
             fallback={
@@ -137,6 +159,7 @@ Use ask_user for high-risk or underspecified requests. Use codex for complex cod
                 "route": fallback_route,
                 "risk": fallback_risk,
                 "difficulty": fallback_difficulty,
+                "project_confidence": 0.8,
                 "rationale": "deterministic fallback",
             },
         )
@@ -152,6 +175,20 @@ Use ask_user for high-risk or underspecified requests. Use codex for complex cod
         )
         risk = _coerce_literal(payload.get("risk"), {"low", "medium", "high"}, fallback_risk)
         difficulty = _coerce_literal(payload.get("difficulty"), {"low", "high"}, fallback_difficulty)
+        project_confidence = _coerce_float(payload.get("project_confidence"), 0.8)
+        human_gate_reason = _router_human_gate_reason(task_type, project_confidence)
+        status: WorkflowStatus = "need_user" if human_gate_reason else "running"
+        report = _node_report(
+            "router",
+            (
+                f"task_type={task_type} route={route} risk={risk} "
+                f"difficulty={difficulty} project_confidence={project_confidence:.2f}"
+            ),
+            status=status,
+            needs_human=bool(human_gate_reason),
+            human_gate_reason=human_gate_reason,
+            data={"rationale": payload.get("rationale", "")},
+        )
         return {
             **state,
             "user_input": user_input,
@@ -159,15 +196,16 @@ Use ask_user for high-risk or underspecified requests. Use codex for complex cod
             "route": route,
             "risk": risk,
             "difficulty": difficulty,
-            "status": "running",
+            "project_confidence": project_confidence,
+            "status": status,
+            "node_reports": _append_node_report(state, report),
+            "needs_human": bool(human_gate_reason),
+            "human_gate_reason": human_gate_reason,
             "trace_events": _append_event(
                 state,
                 TraceEvent(
                     event_type="router",
-                    content=(
-                        f"task_type={task_type} route={route} risk={risk} "
-                        f"difficulty={difficulty}; {payload.get('rationale', '')}"
-                    ),
+                    content=f"{report['summary']}; {payload.get('rationale', '')}",
                     ok=True,
                 ),
             ),
@@ -185,6 +223,25 @@ def _planner_node(model: Any):
             risk=state.get("risk", "low"),
             difficulty=state.get("difficulty", "low"),
         )
+        if state.get("needs_human"):
+            report = _node_report(
+                "planner",
+                "Planner paused because an earlier human gate is pending.",
+                status="need_user",
+                needs_human=True,
+                human_gate_reason=state.get("human_gate_reason", ""),
+            )
+            return {
+                **state,
+                "plan": fallback_plan,
+                "current_step": 0,
+                "status": "need_user",
+                "node_reports": _append_node_report(state, report),
+                "trace_events": _append_event(
+                    state,
+                    TraceEvent(event_type="planner", content=report["summary"], ok=True),
+                ),
+            }
         payload = _invoke_json_node(
             model=model,
             system_prompt=PLANNER_PROMPT
@@ -200,8 +257,9 @@ Return only JSON:
 Rules:
 - Use at most five steps.
 - For high risk, status must be need_user and plan must ask for confirmation.
+- For medium-risk repo changes, plan an isolated branch and explicitly do not merge it to main automatically.
 - For "belongs to which project" or work-record matching, include search_work_record_vectors or capture_work_message in the plan description.
-- For route=codex, include create_work_task and rewrite_task_for_codex before delegation.
+- For route=codex, include create_work_task, rewrite_task_for_codex, test_codex_connectivity, and then delegation with the first usable command in priority order: codex-proxy-anyrouter, codex-proxy-cccx, codex.
 """,
             user_prompt=_planner_user_prompt(state, fallback_plan),
             fallback={"status": "need_user" if state.get("risk") == "high" else "running", "plan": fallback_plan},
@@ -212,13 +270,31 @@ Rules:
             {"running", "need_user"},
             "need_user" if state.get("risk") == "high" else "running",
         )
+        if status == "need_user" and state.get("risk") != "high":
+            status = "running"
         if state.get("risk") == "high":
             status = "need_user"
+        human_gate_reason = (
+            "Planner classified this request as high risk and requires human approval."
+            if state.get("risk") == "high"
+            else ""
+        )
+        report = _node_report(
+            "planner",
+            _format_plan(plan),
+            status=status,
+            needs_human=bool(human_gate_reason),
+            human_gate_reason=human_gate_reason,
+            data={"rationale": payload.get("rationale", "")},
+        )
         return {
             **state,
             "plan": plan,
             "current_step": 0,
             "status": status,
+            "node_reports": _append_node_report(state, report),
+            "needs_human": bool(human_gate_reason),
+            "human_gate_reason": human_gate_reason,
             "trace_events": _append_event(
                 state,
                 TraceEvent(
@@ -244,6 +320,13 @@ def _executor_node(executor: Any, settings: Settings):
                 config={"recursion_limit": settings.agent_recursion_limit},
             )
         except Exception as exc:
+            report = _node_report(
+                "executor",
+                str(exc),
+                status="failed",
+                needs_human=False,
+                data={"error_type": type(exc).__name__},
+            )
             return {
                 **state,
                 "status": "failed",
@@ -252,6 +335,7 @@ def _executor_node(executor: Any, settings: Settings):
                     *state.get("tool_results", []),
                     {"ok": False, "content": str(exc)},
                 ],
+                "node_reports": _append_node_report(state, report),
                 "trace_events": _append_event(
                     state,
                     TraceEvent(event_type="executor", content=str(exc), ok=False),
@@ -259,6 +343,15 @@ def _executor_node(executor: Any, settings: Settings):
             }
 
         answer = _message_content_to_text(result["messages"][-1].content)
+        human_gate_reason = _executor_human_gate_reason(answer)
+        status: WorkflowStatus = "need_user" if human_gate_reason else "running"
+        report = _node_report(
+            "executor",
+            answer,
+            status=status,
+            needs_human=bool(human_gate_reason),
+            human_gate_reason=human_gate_reason,
+        )
         return {
             **state,
             "tool_results": [
@@ -266,7 +359,10 @@ def _executor_node(executor: Any, settings: Settings):
                 {"ok": True, "content": answer},
             ],
             "final_answer": answer,
-            "status": "running",
+            "status": status,
+            "node_reports": _append_node_report(state, report),
+            "needs_human": bool(human_gate_reason),
+            "human_gate_reason": human_gate_reason,
             "trace_events": _append_event(
                 state,
                 TraceEvent(event_type="executor", content=answer, ok=True),
@@ -278,6 +374,23 @@ def _executor_node(executor: Any, settings: Settings):
 
 def _verifier_node(model: Any):
     def run(state: AgentState) -> AgentState:
+        if state.get("needs_human"):
+            report = _node_report(
+                "verifier",
+                "Verifier paused because human approval is pending.",
+                status="need_user",
+                needs_human=True,
+                human_gate_reason=state.get("human_gate_reason", ""),
+            )
+            return {
+                **state,
+                "status": "need_user",
+                "node_reports": _append_node_report(state, report),
+                "trace_events": _append_event(
+                    state,
+                    TraceEvent(event_type="verifier", content=report["summary"], ok=True),
+                ),
+            }
         fallback_ok = state.get("status") != "failed" and bool(state.get("final_answer", "").strip())
         fallback_status: WorkflowStatus = "done" if fallback_ok else "failed"
         fallback_reason = (
@@ -310,9 +423,37 @@ Check whether the answer satisfies the plan and whether user input is required.
         if state.get("status") == "failed":
             status = "failed"
             ok = False
+        if status == "failed":
+            ok = False
+        if not ok and status == "done":
+            status = "failed"
+        verifier_failures = state.get("verifier_failures", 0)
+        if not ok or status in {"failed", "need_user"}:
+            verifier_failures += 1
+        human_gate_reason = (
+            "Verifier failed 3 times and requires human review."
+            if verifier_failures >= 3
+            else ""
+        )
+        if human_gate_reason:
+            status = "need_user"
+        elif status == "need_user":
+            status = "failed"
+        report = _node_report(
+            "verifier",
+            str(payload.get("reason", fallback_reason)),
+            status=status,
+            needs_human=bool(human_gate_reason),
+            human_gate_reason=human_gate_reason,
+            data={"ok": ok, "verifier_failures": verifier_failures},
+        )
         return {
             **state,
             "status": status,
+            "verifier_failures": verifier_failures,
+            "node_reports": _append_node_report(state, report),
+            "needs_human": bool(human_gate_reason),
+            "human_gate_reason": human_gate_reason,
             "trace_events": _append_event(
                 state,
                 TraceEvent(
@@ -339,21 +480,59 @@ def _reflector_node(model: Any):
 Return only JSON:
 {
   "reflection": "one actionable lesson for future similar tasks",
-  "failure_type": "wrong_tool|bad_tool_args|missing_context|hallucinated_fact|unsafe_action|over_delegation|under_delegation|rag_miss|planning_loop|unknown"
+  "failure_type": "wrong_tool|bad_tool_args|missing_context|hallucinated_fact|unsafe_action|over_delegation|under_delegation|rag_miss|planning_loop|unknown",
+  "retry_target": "planner|executor|finalizer"
 }
+Use retry_target="planner" when the plan, context, route, scope, or decomposition is wrong.
+Use retry_target="executor" when the plan is usable but tool choice, tool args, delegation, or execution failed.
+Use retry_target="finalizer" only when retrying would not help.
 """,
             user_prompt=_reflection_user_prompt(state),
             fallback={"reflection": fallback_reflection, "failure_type": "unknown"},
         )
         reflection = str(payload.get("reflection") or fallback_reflection)
+        failure_type = _coerce_literal(
+            payload.get("failure_type"),
+            {
+                "wrong_tool",
+                "bad_tool_args",
+                "missing_context",
+                "hallucinated_fact",
+                "unsafe_action",
+                "over_delegation",
+                "under_delegation",
+                "rag_miss",
+                "planning_loop",
+                "unknown",
+            },
+            "unknown",
+        )
+        retry_target: RetryTarget = _coerce_literal(
+            payload.get("retry_target"),
+            {"planner", "executor", "finalizer"},
+            _retry_target_for_failure(failure_type, reflection),
+        )
+        if state.get("needs_human"):
+            retry_target = "finalizer"
+        retry_status: WorkflowStatus = "failed" if retry_target == "finalizer" else "running"
+        report = _node_report(
+            "reflector",
+            reflection,
+            status=retry_status,
+            needs_human=False,
+            data={"failure_type": failure_type, "retry_target": retry_target},
+        )
         return {
             **state,
             "reflections": [*state.get("reflections", []), reflection],
+            "retry_target": retry_target,
+            "status": retry_status,
+            "node_reports": _append_node_report(state, report),
             "trace_events": _append_event(
                 state,
                 TraceEvent(
                     event_type="reflector",
-                    content=f"{payload.get('failure_type', 'unknown')}: {reflection}",
+                    content=f"{failure_type} -> {retry_target}: {reflection}",
                     ok=False,
                 ),
             ),
@@ -382,15 +561,23 @@ Return only JSON:
   "final_answer": "concise user-facing answer",
   "status": "done|failed|need_user"
 }
-Do not invent tool results. Preserve required confirmation prompts for high-risk tasks.
+Do not invent tool results. Preserve required human gate prompts when needs_human=true.
 """,
             user_prompt=_finalizer_user_prompt(state, fallback_answer),
             fallback={"final_answer": fallback_answer, "status": state.get("status", "done")},
         )
         answer = str(payload.get("final_answer") or fallback_answer)
+        report = _node_report(
+            "finalizer",
+            answer,
+            status=state.get("status", "done"),
+            needs_human=state.get("needs_human", False),
+            human_gate_reason=state.get("human_gate_reason", ""),
+        )
         return {
             **state,
             "final_answer": answer,
+            "node_reports": _append_node_report(state, report),
             "trace_events": _append_event(
                 state,
                 TraceEvent(event_type="finalizer", content=answer, ok=state.get("status") != "failed"),
@@ -493,9 +680,9 @@ def build_plan(
     elif route == "codex":
         steps = [
             "Inspect the request and relevant local context.",
-            "Create a structured work task.",
-            "Rewrite the task for Codex delegation.",
-            "Delegate or prepare the Codex handoff.",
+            "Create a structured work task and rewrite it for Codex delegation.",
+            _codex_connectivity_step(),
+            "Delegate to Codex with the first usable command from codex-proxy-anyrouter, codex-proxy-cccx, codex.",
             "Summarize status and verification needs.",
         ]
     elif task_type == "research":
@@ -515,7 +702,10 @@ def build_plan(
         steps = ["Answer directly unless tools are needed.", "Use tools for verifiable facts."]
 
     if risk == "medium":
-        steps.insert(0, "Use an isolated branch or approval-safe workflow before repo changes.")
+        steps.insert(
+            0,
+            "Use an isolated branch or approval-safe workflow before repo changes; do not merge it to main automatically.",
+        )
     if difficulty == "high" and route != "codex":
         steps.append("Run verifier checks and record failures for reflection if needed.")
     return [{"step": index, "action": _step_action(text), "description": text} for index, text in enumerate(steps, start=1)][:5]
@@ -542,6 +732,17 @@ def _after_verifier(state: AgentState) -> str:
     return "reflect" if state.get("status") == "failed" else "finalize"
 
 
+def _after_reflector(state: AgentState) -> str:
+    if state.get("needs_human") or state.get("status") == "need_user":
+        return "finalize"
+    retry_target = state.get("retry_target", "finalizer")
+    if retry_target == "planner":
+        return "planner"
+    if retry_target == "executor":
+        return "executor"
+    return "finalize"
+
+
 def _state_user_input(state: AgentState) -> str:
     if state.get("user_input"):
         return state["user_input"]
@@ -561,6 +762,16 @@ def _executor_prompt(state: AgentState) -> str:
         "Plan:",
         _format_plan(state.get("plan", [])),
         "",
+        "Reflections from prior failed attempts:",
+        _format_reflections(state.get("reflections", [])),
+        "",
+        "Human gate policy:",
+        "- Default to no human approval unless needs_human is justified.",
+        "- Do not merge an isolated branch back to main automatically.",
+        "",
+        "Codex delegation policy:",
+        _codex_delegation_policy_text(),
+        "",
         "Execute this plan and return the final user-facing answer.",
     ]
     return "\n".join(lines)
@@ -573,6 +784,9 @@ def _planner_user_prompt(state: AgentState, fallback_plan: list[dict[str, Any]])
             "",
             f"Router output: task_type={state.get('task_type')} route={state.get('route')} "
             f"risk={state.get('risk')} difficulty={state.get('difficulty')}",
+            "",
+            "Reflections from prior failed attempts:",
+            _format_reflections(state.get("reflections", [])),
             "",
             "Fallback plan for reference:",
             _format_plan(fallback_plan),
@@ -609,6 +823,7 @@ def _reflection_user_prompt(state: AgentState) -> str:
             "",
             f"Status: {state.get('status')}",
             f"Error type: {state.get('error_type', '')}",
+            f"Verifier failures: {state.get('verifier_failures', 0)}",
             f"Tool results: {state.get('tool_results', [])}",
         ]
     )
@@ -622,9 +837,14 @@ def _finalizer_user_prompt(state: AgentState, fallback_answer: str) -> str:
             f"Workflow status: {state.get('status')}",
             f"Task type: {state.get('task_type')}",
             f"Route: {state.get('route')}",
+            f"Needs human: {state.get('needs_human', False)}",
+            f"Human gate reason: {state.get('human_gate_reason', '')}",
             "",
             "Plan:",
             _format_plan(state.get("plan", [])),
+            "",
+            "Node reports:",
+            _format_node_reports(state.get("node_reports", [])),
             "",
             f"Executor answer:\n{state.get('final_answer', '')}",
             "",
@@ -634,8 +854,10 @@ def _finalizer_user_prompt(state: AgentState, fallback_answer: str) -> str:
 
 
 def _confirmation_answer(state: AgentState) -> str:
+    reason = state.get("human_gate_reason", "") or "Human approval is required before execution."
     return (
-        "This request was classified as high risk and needs confirmation before execution.\n"
+        "This workflow needs human approval before continuing.\n"
+        f"reason: {reason}\n"
         f"task_type: {state.get('task_type')}\n"
         f"risk: {state.get('risk')}\n"
         "Planned steps:\n"
@@ -650,8 +872,128 @@ def _format_plan(plan: list[dict[str, Any]]) -> str:
     )
 
 
+def _format_reflections(reflections: list[str]) -> str:
+    if not reflections:
+        return "(none)"
+    return "\n".join(f"- {reflection}" for reflection in reflections[-3:])
+
+
+def _codex_command_names() -> str:
+    return ",".join(CODEX_COMMAND_PRIORITY)
+
+
+def _codex_connectivity_step() -> str:
+    return (
+        "Call test_codex_connectivity with "
+        f"command_names=\"{_codex_command_names()}\" before starting Codex."
+    )
+
+
+def _codex_delegation_policy_text() -> str:
+    return "\n".join(
+        [
+            _codex_connectivity_step(),
+            "Read the connectivity result and choose the first usable command in this order: "
+            + ", ".join(CODEX_COMMAND_PRIORITY)
+            + ".",
+            (
+                "Pass the chosen command via codex_command to run_codex_task, "
+                "start_codex_session, or continue_codex_session."
+            ),
+            "If none of those commands are usable, do not start Codex; report the connectivity blocker.",
+        ]
+    )
+
+
+def _format_node_reports(reports: list[dict[str, Any]]) -> str:
+    if not reports:
+        return "(none)"
+    return "\n".join(
+        (
+            f"- {report.get('node', 'unknown')}: status={report.get('status', '')} "
+            f"needs_human={report.get('needs_human', False)} "
+            f"summary={report.get('summary', '')}"
+        )
+        for report in reports
+    )
+
+
 def _append_event(state: AgentState, event: TraceEvent) -> list[TraceEvent]:
     return [*state.get("trace_events", []), event]
+
+
+def _node_report(
+    node: str,
+    summary: str,
+    *,
+    status: str,
+    needs_human: bool,
+    human_gate_reason: str = "",
+    data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "node": node,
+        "summary": summary,
+        "status": status,
+        "needs_human": needs_human,
+        "human_gate_reason": human_gate_reason,
+        "data": data or {},
+    }
+
+
+def _append_node_report(state: AgentState, report: dict[str, Any]) -> list[dict[str, Any]]:
+    return [*state.get("node_reports", []), report]
+
+
+def _router_human_gate_reason(task_type: TaskType, project_confidence: float) -> str:
+    if task_type == "work_message" and project_confidence < 0.35:
+        return "Router project ownership confidence is low; human project assignment is required."
+    return ""
+
+
+def _executor_human_gate_reason(answer: str) -> str:
+    lowered = answer.lower()
+    merge_markers = [
+        "merge request",
+        "pull request",
+        "open a pr",
+        "opened pr",
+        "merge to main",
+        "merge into main",
+        "合并请求",
+        "发起pr",
+        "发起 pr",
+        "合并到main",
+        "合并到 main",
+    ]
+    if any(marker in lowered for marker in merge_markers):
+        return "Executor initiated or requested a branch merge; human approval is required."
+    return ""
+
+
+def _retry_target_for_failure(failure_type: str, reflection: str = "") -> RetryTarget:
+    planner_failures = {
+        "missing_context",
+        "rag_miss",
+        "planning_loop",
+        "under_delegation",
+        "over_delegation",
+        "unsafe_action",
+    }
+    executor_failures = {"wrong_tool", "bad_tool_args", "hallucinated_fact"}
+    if failure_type in planner_failures:
+        return "planner"
+    if failure_type in executor_failures:
+        return "executor"
+
+    lowered = reflection.lower()
+    planner_markers = ["plan", "planning", "context", "scope", "route", "decomposition", "missing context"]
+    executor_markers = ["tool", "argument", "args", "execute", "execution", "codex", "delegation"]
+    if any(marker in lowered for marker in planner_markers):
+        return "planner"
+    if any(marker in lowered for marker in executor_markers):
+        return "executor"
+    return "executor"
 
 
 def _invoke_json_node(
@@ -709,6 +1051,14 @@ def _coerce_literal(value: Any, allowed: set[str], fallback: Any) -> Any:
     if isinstance(value, str) and value in allowed:
         return value
     return fallback
+
+
+def _coerce_float(value: Any, fallback: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    return max(0.0, min(number, 1.0))
 
 
 def _coerce_plan(value: Any, fallback: list[dict[str, Any]]) -> list[dict[str, Any]]:
