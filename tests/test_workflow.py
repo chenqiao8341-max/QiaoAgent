@@ -43,6 +43,21 @@ def test_workflow_router_classifies_work_message() -> None:
     assert difficulty == "low"
 
 
+def test_workflow_router_marks_rag_questions_for_retrieval() -> None:
+    state = _router_node(
+        _FakeJsonModel(
+            '{"task_type": "rag_qa", "route": "self", "risk": "low", '
+            '"difficulty": "low", "project_confidence": 0.9, '
+            '"retrieval_needed": true, "retrieval_scope": "all", '
+            '"rationale": "needs local citations"}'
+        )
+    )({"messages": [type("Message", (), {"content": "根据知识库回答并给引用"})()]})
+
+    assert state["task_type"] == "rag_qa"
+    assert state["retrieval_needed"] is True
+    assert state["retrieval_scope"] == "all"
+
+
 def test_workflow_router_classifies_high_difficulty_code_task() -> None:
     task_type = classify_task_type("实现全自动化多节点工作流并补测试。")
     route, risk, difficulty = classify_route_risk_difficulty(
@@ -67,6 +82,20 @@ def test_workflow_medium_risk_plan_forbids_auto_merge() -> None:
 
     assert "isolated branch" in plan[0]["description"]
     assert "do not merge it to main automatically" in plan[0]["description"]
+
+
+def test_workflow_rag_plan_requires_search_and_citation_verification() -> None:
+    plan = build_plan(
+        user_input="根据知识库说明 human gate，并给引用。",
+        task_type="rag_qa",
+        route="self",
+        risk="low",
+        difficulty="low",
+    )
+    descriptions = "\n".join(step["description"] for step in plan)
+
+    assert "search_knowledge or answer_with_citations" in descriptions
+    assert "verify_answer_citations" in descriptions
 
 
 def test_workflow_codex_plan_tests_connectivity_before_delegation() -> None:

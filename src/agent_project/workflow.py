@@ -13,6 +13,7 @@ from agent_project.llms import build_chat_model
 from agent_project.tools import get_tools
 from agent_project.tools.human_gate import create_human_gate_request
 from agent_project.tools.memory import reflection_memory_context, store_reflection_memory
+from agent_project.tools.rag import rag_search_trace_event, search_knowledge_records
 from agent_project.tracing import TraceEvent
 
 
@@ -51,6 +52,8 @@ class AgentState(TypedDict, total=False):
     retry_target: RetryTarget
     trace_id: str
     trace_events: list[TraceEvent]
+    retrieval_needed: bool
+    retrieval_scope: str
 
 
 ROUTER_PROMPT = """You are the Router node.
@@ -176,10 +179,13 @@ Return only JSON:
   "risk": "low|medium|high",
   "difficulty": "low|high",
   "project_confidence": 0.0,
+  "retrieval_needed": true,
+  "retrieval_scope": "docs|work_records|project|all|none",
   "rationale": "short reason"
 }
 Use ask_user for high-risk or underspecified requests. Use codex for complex code/deploy/test work.
 For work_message requests that need project ownership, set project_confidence from 0 to 1.
+For rag_qa, local document questions, explicit citation requests, or work-record questions, set retrieval_needed=true.
 """,
             user_prompt=f"Classify this request:\n{user_input}",
             fallback={
@@ -188,6 +194,8 @@ For work_message requests that need project ownership, set project_confidence fr
                 "risk": fallback_risk,
                 "difficulty": fallback_difficulty,
                 "project_confidence": 0.8,
+                "retrieval_needed": fallback_task_type in {"rag_qa", "work_message"},
+                "retrieval_scope": _fallback_retrieval_scope(user_input, fallback_task_type),
                 "rationale": "deterministic fallback",
             },
         )
@@ -204,13 +212,23 @@ For work_message requests that need project ownership, set project_confidence fr
         risk = _coerce_literal(payload.get("risk"), {"low", "medium", "high"}, fallback_risk)
         difficulty = _coerce_literal(payload.get("difficulty"), {"low", "high"}, fallback_difficulty)
         project_confidence = _coerce_float(payload.get("project_confidence"), 0.8)
+        retrieval_needed = _coerce_bool(
+            payload.get("retrieval_needed"),
+            task_type in {"rag_qa", "work_message"},
+        )
+        retrieval_scope = _coerce_literal(
+            payload.get("retrieval_scope"),
+            {"docs", "work_records", "project", "all", "none"},
+            _fallback_retrieval_scope(user_input, task_type),
+        )
         human_gate_reason = _router_human_gate_reason(task_type, project_confidence)
         status: WorkflowStatus = "need_user" if human_gate_reason else "running"
         report = _node_report(
             "router",
             (
                 f"task_type={task_type} route={route} risk={risk} "
-                f"difficulty={difficulty} project_confidence={project_confidence:.2f}"
+                f"difficulty={difficulty} project_confidence={project_confidence:.2f} "
+                f"retrieval_needed={retrieval_needed} retrieval_scope={retrieval_scope}"
             ),
             status=status,
             needs_human=bool(human_gate_reason),
@@ -225,6 +243,8 @@ For work_message requests that need project ownership, set project_confidence fr
             "risk": risk,
             "difficulty": difficulty,
             "project_confidence": project_confidence,
+            "retrieval_needed": retrieval_needed,
+            "retrieval_scope": retrieval_scope,
             "status": status,
             "node_reports": _append_node_report(state, report),
             "needs_human": bool(human_gate_reason),
@@ -308,6 +328,8 @@ Rules:
 - For high risk, status must be need_user and plan must ask for confirmation.
 - For medium-risk repo changes, plan ensure_work_branch, use an isolated branch, and explicitly do not merge it to main automatically.
 - For "belongs to which project" or work-record matching, include search_work_record_vectors or capture_work_message in the plan description.
+- For rag_qa or retrieval_needed=true, include search_knowledge or answer_with_citations before final synthesis.
+- For citation answers, include verify_answer_citations after drafting the answer.
 - For route=codex, include create_work_task, rewrite_task_for_codex, test_codex_connectivity, and then delegation with the first usable command in priority order: codex-proxy-anyrouter, codex-proxy-cccx, codex.
 """,
             user_prompt=_planner_user_prompt(state, fallback_plan),
@@ -393,6 +415,8 @@ def _executor_node(executor: Any, settings: Settings):
 
         answer = _message_content_to_text(result["messages"][-1].content)
         tool_trace_events = _trace_events_from_executor_messages(result.get("messages", []))
+        if state.get("retrieval_needed") or state.get("task_type") == "rag_qa":
+            tool_trace_events.extend(_rag_trace_events_from_tool_results(state, result.get("messages", [])))
         human_gate_reason = _executor_human_gate_reason(answer)
         status: WorkflowStatus = "need_user" if human_gate_reason else "running"
         report = _node_report(
@@ -764,9 +788,10 @@ def build_plan(
         ]
     elif task_type in {"file_task", "rag_qa"}:
         steps = [
-            "Identify relevant local files or knowledge records.",
-            "Read or search the grounded context.",
-            "Answer using cited local evidence.",
+            "Identify relevant local files or indexed private knowledge records.",
+            "Call search_knowledge or answer_with_citations to retrieve grounded chunks and allowed citation IDs.",
+            "Draft the answer using bracketed citations from retrieved chunks.",
+            "Call verify_answer_citations before finalizing cited claims.",
         ]
     else:
         steps = ["Answer directly unless tools are needed.", "Use tools for verifiable facts."]
@@ -828,19 +853,26 @@ def _executor_prompt(state: AgentState) -> str:
         "",
         f"Router: task_type={state.get('task_type')} route={state.get('route')} "
         f"risk={state.get('risk')} difficulty={state.get('difficulty')}",
+        f"Retrieval: needed={state.get('retrieval_needed', False)} scope={state.get('retrieval_scope', 'none')}",
         "",
         "Plan:",
         _format_plan(state.get("plan", [])),
         "",
-            "Reflections from prior failed attempts:",
-            _format_reflections(state.get("reflections", [])),
-            "",
-            _persistent_reflection_context(state),
-            "",
-            "Human gate policy:",
+        "Reflections from prior failed attempts:",
+        _format_reflections(state.get("reflections", [])),
+        "",
+        _persistent_reflection_context(state),
+        "",
+        "Human gate policy:",
         "- Default to no human approval unless needs_human is justified.",
         "- Do not merge an isolated branch back to main automatically.",
         "- For medium-risk repo work, call ensure_work_branch before changing files.",
+        "",
+        "Private knowledge RAG policy:",
+        "- For rag_qa or retrieval_needed=true, call search_knowledge or answer_with_citations before answering.",
+        "- Use only retrieved citation IDs in bracketed citations.",
+        "- Call verify_answer_citations before finalizing answers with citations.",
+        "- If no chunks are retrieved, say the local knowledge base lacks grounded evidence.",
         "",
         "Codex delegation policy:",
         _codex_delegation_policy_text(),
@@ -870,6 +902,7 @@ def _planner_user_prompt(state: AgentState, fallback_plan: list[dict[str, Any]])
             "",
             f"Router output: task_type={state.get('task_type')} route={state.get('route')} "
             f"risk={state.get('risk')} difficulty={state.get('difficulty')}",
+            f"Retrieval: needed={state.get('retrieval_needed', False)} scope={state.get('retrieval_scope', 'none')}",
             "",
             "Reflections from prior failed attempts:",
             _format_reflections(state.get("reflections", [])),
@@ -889,6 +922,7 @@ def _verifier_user_prompt(state: AgentState) -> str:
             "",
             f"Router: task_type={state.get('task_type')} route={state.get('route')} "
             f"risk={state.get('risk')} difficulty={state.get('difficulty')}",
+            f"Retrieval: needed={state.get('retrieval_needed', False)} scope={state.get('retrieval_scope', 'none')}",
             "",
             "Plan:",
             _format_plan(state.get("plan", [])),
@@ -1057,6 +1091,33 @@ def _trace_events_from_executor_messages(messages: list[Any]) -> list[TraceEvent
     return events
 
 
+def _rag_trace_events_from_tool_results(state: AgentState, messages: list[Any]) -> list[TraceEvent]:
+    events: list[TraceEvent] = []
+    query = state.get("user_input", "")
+    limit = 5
+    for message in messages:
+        if getattr(message, "type", "") != "tool":
+            continue
+        name = str(getattr(message, "name", "") or getattr(message, "tool_call_id", ""))
+        if name not in {"search_knowledge", "answer_with_citations"}:
+            continue
+        content = _message_content_to_text(getattr(message, "content", ""))
+        if content.startswith("No knowledge chunks found") or content.startswith("No grounded evidence found"):
+            events.append(
+                TraceEvent(
+                    event_type="rag_retrieval",
+                    tool=name,
+                    content=f"query={query.strip()} top_k={limit} results=0",
+                    args={"query": query.strip(), "top_k": limit, "results": []},
+                    ok=True,
+                )
+            )
+            continue
+        results = search_knowledge_records(query, limit=limit)
+        events.append(rag_search_trace_event(query, limit, results))
+    return events
+
+
 def _node_report(
     node: str,
     summary: str,
@@ -1084,6 +1145,17 @@ def _router_human_gate_reason(task_type: TaskType, project_confidence: float) ->
     if task_type == "work_message" and project_confidence < 0.35:
         return "Router project ownership confidence is low; human project assignment is required."
     return ""
+
+
+def _fallback_retrieval_scope(user_input: str, task_type: TaskType) -> str:
+    lowered = user_input.lower()
+    if task_type == "work_message" or any(marker in lowered for marker in ["工作记录", "aaa-work"]):
+        return "work_records"
+    if any(marker in lowered for marker in ["项目", "readme", "代码结构"]):
+        return "project"
+    if task_type == "rag_qa":
+        return "all"
+    return "none"
 
 
 def _executor_human_gate_reason(answer: str) -> str:
@@ -1194,6 +1266,18 @@ def _coerce_float(value: Any, fallback: float) -> float:
     except (TypeError, ValueError):
         return fallback
     return max(0.0, min(number, 1.0))
+
+
+def _coerce_bool(value: Any, fallback: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "yes", "1"}:
+            return True
+        if lowered in {"false", "no", "0"}:
+            return False
+    return fallback
 
 
 def _coerce_plan(value: Any, fallback: list[dict[str, Any]]) -> list[dict[str, Any]]:

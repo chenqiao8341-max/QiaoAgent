@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import ast
 import json
 import math
 import re
@@ -11,13 +12,14 @@ from typing import Any, get_args
 from langchain_core.tools import tool
 
 from agent_project.config import load_settings
-from agent_project.rag_schemas import KnowledgeChunk, KnowledgeSource, RetrievedChunk, SourceType
+from agent_project.rag_schemas import Citation, KnowledgeChunk, KnowledgeSource, RetrievedChunk, SourceType
+from agent_project.tracing import TraceEvent
 from agent_project.tools.progress import emit_progress
 from agent_project.tools.storage import connect, state_db_path
 from agent_project.tools.work_vectors import _cosine, _embed_texts, _normalize
 
 
-DOCUMENT_SUFFIXES = {".md", ".markdown", ".txt", ".rst"}
+DOCUMENT_SUFFIXES = {".md", ".markdown", ".txt", ".rst", ".py"}
 ALLOWED_SOURCE_TYPES = set(get_args(SourceType))
 
 
@@ -126,6 +128,67 @@ def chunk_document_text(
     return chunks
 
 
+def chunk_python_source(
+    text: str,
+    path: str = "",
+    max_chars_per_chunk: int = 1600,
+    overlap: int = 120,
+) -> list[dict[str, str]]:
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return chunk_document_text(text, path=path, max_chars_per_chunk=max_chars_per_chunk, overlap=overlap)
+
+    lines = text.splitlines()
+    chunks: list[dict[str, str]] = []
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            start = max(getattr(node, "lineno", 1), 1)
+            end = max(getattr(node, "end_lineno", start), start)
+            symbol_type = "class" if isinstance(node, ast.ClassDef) else "function"
+            symbol_text = "\n".join(lines[start - 1 : end]).strip()
+            heading_path = f"{Path(path).name} > {symbol_type} {node.name}" if path else f"{symbol_type} {node.name}"
+            for chunk_text in _split_text_windows(symbol_text, max_chars_per_chunk, overlap):
+                chunks.append({"path": path, "heading_path": heading_path, "text": chunk_text})
+
+    prelude_lines = []
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            break
+        start = max(getattr(node, "lineno", 1), 1)
+        end = max(getattr(node, "end_lineno", start), start)
+        prelude_lines.extend(lines[start - 1 : end])
+    prelude = "\n".join(prelude_lines).strip()
+    if prelude:
+        heading_path = f"{Path(path).name} > module prelude" if path else "module prelude"
+        chunks.insert(0, {"path": path, "heading_path": heading_path, "text": prelude})
+
+    if chunks:
+        return chunks
+    return chunk_document_text(text, path=path, max_chars_per_chunk=max_chars_per_chunk, overlap=overlap)
+
+
+def chunk_source_text(
+    text: str,
+    path: str = "",
+    max_chars_per_chunk: int = 1200,
+    overlap: int = 120,
+) -> list[dict[str, str]]:
+    if Path(path).suffix.lower() == ".py":
+        return chunk_python_source(
+            text,
+            path=path,
+            max_chars_per_chunk=max_chars_per_chunk,
+            overlap=overlap,
+        )
+    return chunk_document_text(
+        text,
+        path=path,
+        max_chars_per_chunk=max_chars_per_chunk,
+        overlap=overlap,
+    )
+
+
 def _iter_document_paths(paths: str) -> list[Path]:
     seen: set[Path] = set()
     results: list[Path] = []
@@ -212,7 +275,7 @@ def index_document_paths(
                 )
             )
             for index, chunk in enumerate(
-                chunk_document_text(
+                chunk_source_text(
                     text,
                     path=display_path,
                     max_chars_per_chunk=max_chars_per_chunk,
@@ -336,6 +399,17 @@ def _lexical_score(query: str, text: str) -> float:
     return overlap / math.sqrt(len(query_terms) * len(text_terms))
 
 
+def _rerank_score(query: str, chunk: KnowledgeChunk, lexical: float, vector_score: float) -> float:
+    query_terms = _terms(query)
+    heading_terms = _terms(f"{chunk.title} {chunk.heading_path}")
+    heading_boost = 0.15 if query_terms and query_terms & heading_terms else 0.0
+    citation_boost = 0.05 if chunk.citation_id else 0.0
+    hybrid = (0.55 * vector_score if vector_score else 0.0) + (0.45 * lexical)
+    if not vector_score:
+        hybrid = lexical
+    return min(1.0, hybrid + heading_boost + citation_boost)
+
+
 def _chunk_from_row(row: Any, embedding: list[float]) -> KnowledgeChunk:
     return KnowledgeChunk(
         chunk_id=row["chunk_id"],
@@ -356,7 +430,11 @@ def _chunk_from_row(row: Any, embedding: list[float]) -> KnowledgeChunk:
     )
 
 
-def search_knowledge_records(query: str, limit: int = 5) -> list[RetrievedChunk]:
+def search_knowledge_records(
+    query: str,
+    limit: int = 5,
+    source_types: list[str] | None = None,
+) -> list[RetrievedChunk]:
     clean_query = query.strip()
     if not clean_query:
         return []
@@ -370,6 +448,12 @@ def search_knowledge_records(query: str, limit: int = 5) -> list[RetrievedChunk]
     except Exception:
         query_vector = []
 
+    allowed_source_types = {
+        _coerce_source_type(source_type)
+        for source_type in (source_types or [])
+        if source_type.strip()
+    }
+
     with connect() as connection:
         rows = connection.execute(
             """
@@ -381,6 +465,8 @@ def search_knowledge_records(query: str, limit: int = 5) -> list[RetrievedChunk]
 
     scored: list[tuple[float, str, KnowledgeChunk]] = []
     for row in rows:
+        if allowed_source_types and row["source_type"] not in allowed_source_types:
+            continue
         try:
             embedding = json.loads(row["embedding_json"] or "[]")
         except json.JSONDecodeError:
@@ -391,21 +477,69 @@ def search_knowledge_records(query: str, limit: int = 5) -> list[RetrievedChunk]
             if query_vector and embedding and row["embedding_model"] == model_path
             else 0.0
         )
-        if vector_score:
-            score = max(vector_score, lexical * 0.75)
-            method = "vector"
-        else:
-            score = lexical
-            method = "lexical"
+        chunk = _chunk_from_row(row, embedding)
+        score = _rerank_score(clean_query, chunk, lexical, vector_score)
+        method = "hybrid_rerank" if vector_score else "lexical_rerank"
         if score <= 0:
             continue
-        scored.append((score, method, _chunk_from_row(row, embedding)))
+        scored.append((score, method, chunk))
 
     scored.sort(key=lambda item: item[0], reverse=True)
     return [
         RetrievedChunk(chunk=chunk, score=score, rank=index, retrieval_method=method)
         for index, (score, method, chunk) in enumerate(scored[:limit], start=1)
     ]
+
+
+def retrieved_chunks_payload(results: list[RetrievedChunk]) -> list[dict[str, Any]]:
+    payload: list[dict[str, Any]] = []
+    for result in results:
+        chunk = result.chunk
+        payload.append(
+            {
+                "rank": result.rank,
+                "query_score": round(result.score, 6),
+                "score": round(result.score, 6),
+                "retrieval_method": result.retrieval_method,
+                "source": chunk.path or chunk.url or chunk.title,
+                "source_id": chunk.source_id,
+                "source_type": chunk.source_type,
+                "chunk_id": chunk.chunk_id,
+                "citation_id": chunk.citation_id,
+                "title": chunk.title,
+                "heading_path": chunk.heading_path,
+                "snippet": _snippet(chunk.text),
+            }
+        )
+    return payload
+
+
+def citations_for_results(results: list[RetrievedChunk]) -> list[Citation]:
+    citations: list[Citation] = []
+    for result in results:
+        chunk = result.chunk
+        citations.append(
+            Citation(
+                citation_id=chunk.citation_id,
+                source_id=chunk.source_id,
+                chunk_id=chunk.chunk_id,
+                label=chunk.title or chunk.path or chunk.citation_id,
+                path=chunk.path,
+                url=chunk.url,
+                heading_path=chunk.heading_path,
+            )
+        )
+    return citations
+
+
+def search_knowledge_payload(query: str, limit: int = 5) -> dict[str, Any]:
+    results = search_knowledge_records(query, limit=limit)
+    return {
+        "query": query.strip(),
+        "top_k": max(1, min(limit, 20)),
+        "results": retrieved_chunks_payload(results),
+        "citations": [citation.model_dump() for citation in citations_for_results(results)],
+    }
 
 
 def _snippet(text: str, max_chars: int = 500) -> str:
@@ -430,6 +564,29 @@ def format_retrieved_chunks(results: list[RetrievedChunk]) -> str:
     return "\n".join(lines)
 
 
+def format_answer_evidence(query: str, results: list[RetrievedChunk]) -> str:
+    if not results:
+        return "No grounded evidence found. Run index_documents first or broaden the query."
+    citation_ids = [result.chunk.citation_id for result in results]
+    lines = [f"Grounded evidence for: {query.strip()}"]
+    for result in results:
+        chunk = result.chunk
+        label = chunk.title
+        if chunk.heading_path:
+            label = f"{label} / {chunk.heading_path}" if label else chunk.heading_path
+        lines.append(
+            f"- [{chunk.citation_id}] source={chunk.path or chunk.url or label} "
+            f"score={result.score:.3f}"
+        )
+        lines.append(f"  {_snippet(chunk.text, max_chars=700)}")
+    lines.append("")
+    lines.append("Allowed citation IDs: " + ", ".join(citation_ids))
+    lines.append(
+        "Draft answer rule: every factual claim must include one of the allowed bracketed citations."
+    )
+    return "\n".join(lines)
+
+
 def extract_citation_ids(text: str) -> set[str]:
     return {
         match.strip()
@@ -448,6 +605,86 @@ def verify_citation_ids(answer: str, allowed_citation_ids: list[str] | set[str])
         "allowed": sorted(allowed),
         "missing": missing,
     }
+
+
+def _answer_claim_terms(answer: str, citation_ids: set[str]) -> set[str]:
+    clean = answer
+    for citation_id in citation_ids:
+        clean = clean.replace(f"[{citation_id}]", " ")
+    stopwords = {
+        "the",
+        "and",
+        "for",
+        "with",
+        "that",
+        "this",
+        "from",
+        "into",
+        "using",
+        "use",
+        "are",
+        "was",
+        "were",
+        "根据",
+        "引用",
+        "来源",
+        "当前",
+        "可以",
+    }
+    return {term for term in _terms(clean) if len(term) > 1 and term not in stopwords}
+
+
+def verify_answer_against_retrieved_chunks(
+    answer: str,
+    retrieved_chunks: list[RetrievedChunk],
+) -> dict[str, Any]:
+    id_result = verify_citation_ids(
+        answer,
+        [result.chunk.citation_id for result in retrieved_chunks],
+    )
+    if not id_result["ok"]:
+        return {**id_result, "supported": False, "unsupported": id_result["used"]}
+
+    used = set(id_result["used"])
+    if not used:
+        return {**id_result, "ok": False, "supported": False, "unsupported": [], "reason": "no citations used"}
+
+    answer_terms = _answer_claim_terms(answer, used)
+    chunks_by_citation = {result.chunk.citation_id: result.chunk for result in retrieved_chunks}
+    unsupported: list[str] = []
+    support: dict[str, dict[str, Any]] = {}
+    for citation_id in sorted(used):
+        chunk = chunks_by_citation[citation_id]
+        evidence_terms = _terms(f"{chunk.title}\n{chunk.heading_path}\n{chunk.text}")
+        overlap = sorted(answer_terms & evidence_terms)
+        support[citation_id] = {
+            "overlap_terms": overlap[:20],
+            "overlap_count": len(overlap),
+        }
+        if answer_terms and not overlap:
+            unsupported.append(citation_id)
+
+    return {
+        **id_result,
+        "ok": not unsupported,
+        "supported": not unsupported,
+        "unsupported": unsupported,
+        "support": support,
+    }
+
+
+def rag_search_trace_event(query: str, limit: int, results: list[RetrievedChunk]) -> TraceEvent:
+    return TraceEvent(
+        event_type="rag_retrieval",
+        tool="search_knowledge",
+        content=f"query={query.strip()} top_k={limit} results={len(results)}",
+        args={
+            "query": query.strip(),
+            "top_k": max(1, min(limit, 20)),
+            "results": retrieved_chunks_payload(results),
+        },
+        ok=True,
+    )
 
 
 @tool
@@ -490,16 +727,7 @@ def search_knowledge(query: str, limit: int = 5) -> str:
 def answer_with_citations(query: str, limit: int = 5) -> str:
     """Return grounded evidence snippets and citation IDs for a cited answer."""
     results = search_knowledge_records(query, limit=limit)
-    if not results:
-        return "No grounded evidence found. Run index_documents first or broaden the query."
-    citation_ids = [result.chunk.citation_id for result in results]
-    lines = ["Grounded evidence:"]
-    for result in results:
-        chunk = result.chunk
-        lines.append(f"- [{chunk.citation_id}] {_snippet(chunk.text, max_chars=700)}")
-    lines.append("")
-    lines.append("Allowed citation IDs: " + ", ".join(citation_ids))
-    return "\n".join(lines)
+    return format_answer_evidence(query, results)
 
 
 @tool

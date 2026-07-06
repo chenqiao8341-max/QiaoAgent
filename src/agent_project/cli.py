@@ -21,6 +21,13 @@ from agent_project.sessions import (
     load_session_messages,
 )
 from agent_project.tools.human_gate import approve_human_gate, list_human_gates
+from agent_project.tools.rag import (
+    format_answer_evidence,
+    format_retrieved_chunks,
+    index_document_paths,
+    search_knowledge_records,
+    verify_answer_against_retrieved_chunks,
+)
 from agent_project.tracing import TraceEvent, TraceStore
 
 
@@ -200,6 +207,69 @@ def list_saved_sessions(include_all: bool = False) -> None:
 
 def main() -> None:
     argv = sys.argv[1:]
+    if argv and argv[0] == "knowledge":
+        parser = argparse.ArgumentParser(description="Manage the local private knowledge base.")
+        subparsers = parser.add_subparsers(dest="command", required=True)
+
+        index_parser = subparsers.add_parser("index", help="Index Markdown/text files or folders.")
+        index_parser.add_argument("paths", nargs="+", help="Document paths or directories.")
+        index_parser.add_argument("--source-type", default="docs", help="Knowledge source type.")
+        index_parser.add_argument("--force", action="store_true", help="Re-index unchanged documents.")
+        index_parser.add_argument("--max-chars", type=int, default=1200, help="Maximum chunk size.")
+
+        search_parser = subparsers.add_parser("search", help="Search indexed knowledge.")
+        search_parser.add_argument("query", help="Search query.")
+        search_parser.add_argument("--limit", type=int, default=5, help="Maximum chunks to return.")
+
+        answer_parser = subparsers.add_parser(
+            "answer",
+            help="Return grounded evidence and allowed citation IDs for a query.",
+        )
+        answer_parser.add_argument("query", help="Question to answer from private knowledge.")
+        answer_parser.add_argument("--limit", type=int, default=5, help="Maximum chunks to return.")
+
+        verify_parser = subparsers.add_parser(
+            "verify",
+            help="Verify an answer against retrieved chunks for a query.",
+        )
+        verify_parser.add_argument("query", help="Original retrieval query.")
+        verify_parser.add_argument("answer", help="Answer text containing bracketed citation IDs.")
+        verify_parser.add_argument("--limit", type=int, default=5, help="Maximum chunks to retrieve.")
+
+        args = parser.parse_args(argv[1:])
+        load_settings()
+        if args.command == "index":
+            result = index_document_paths(
+                "\n".join(args.paths),
+                source_type=args.source_type,
+                force=args.force,
+                max_chars_per_chunk=args.max_chars,
+            )
+            print(
+                "\n".join(
+                    [
+                        "Knowledge index ready.",
+                        f"documents: {result['documents']}",
+                        f"updated_documents: {result['updated_documents']}",
+                        f"skipped_documents: {result.get('skipped_documents', 0)}",
+                        f"chunks: {result['chunks']}",
+                    ]
+                )
+            )
+            if result.get("embedding_error"):
+                print(f"embedding_fallback: lexical search ({result['embedding_error']})")
+            return
+        if args.command == "search":
+            print(format_retrieved_chunks(search_knowledge_records(args.query, limit=args.limit)))
+            return
+        if args.command == "answer":
+            print(format_answer_evidence(args.query, search_knowledge_records(args.query, limit=args.limit)))
+            return
+        if args.command == "verify":
+            results = search_knowledge_records(args.query, limit=args.limit)
+            print(verify_answer_against_retrieved_chunks(args.answer, results))
+            return
+
     if argv and argv[0] == "human-gates":
         parser = argparse.ArgumentParser(description="List saved human gate approval requests.")
         parser.add_argument("--status", default="pending", help="Gate status to list.")

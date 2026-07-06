@@ -16,8 +16,13 @@ from agent_project.tools.human_gate import (
 )
 from agent_project.tools.project_context import load_project_context_text
 from agent_project.tools.rag import (
+    citations_for_results,
+    chunk_source_text,
     index_document_paths,
+    rag_search_trace_event,
+    search_knowledge_payload,
     search_knowledge_records,
+    verify_answer_against_retrieved_chunks,
     verify_citation_ids,
 )
 from agent_project.tools.storage import connect
@@ -155,6 +160,73 @@ def test_rag_indexes_searches_and_verifies_citations(tmp_path, monkeypatch) -> N
     assert "agent-notes.md" in citation_id
     assert verify_citation_ids(f"Use approval before resume [{citation_id}]", [citation_id])["ok"]
     assert not verify_citation_ids("Unsupported [missing-citation]", [citation_id])["ok"]
+
+
+def test_rag_chunks_python_source_by_function_and_class() -> None:
+    chunks = chunk_source_text(
+        "class Router:\n    pass\n\n\ndef build_plan():\n    return []\n",
+        path="/repo/workflow.py",
+    )
+    headings = {chunk["heading_path"] for chunk in chunks}
+
+    assert "workflow.py > class Router" in headings
+    assert "workflow.py > function build_plan" in headings
+
+
+def test_rag_payload_citations_and_trace_include_auditable_fields(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("AGENT_STATE_DB_PATH", str(tmp_path / "agent.sqlite3"))
+    monkeypatch.setenv("AGENT_EMBEDDING_MODEL_PATH", str(tmp_path / "missing-embedding-model"))
+    doc = tmp_path / "sop.md"
+    doc.write_text(
+        "# Release SOP\n\nRun live eval before a release and keep cited evidence in the trace.\n",
+        encoding="utf-8",
+    )
+
+    index_document_paths(str(doc), source_type="sop", force=True)
+    results = search_knowledge_records("release live eval cited evidence trace", limit=2)
+    payload = search_knowledge_payload("release live eval cited evidence trace", limit=2)
+    citations = citations_for_results(results)
+    event = rag_search_trace_event("release live eval cited evidence trace", 2, results)
+
+    assert payload["query"] == "release live eval cited evidence trace"
+    assert payload["top_k"] == 2
+    assert payload["results"][0]["source"]
+    assert payload["results"][0]["chunk_id"]
+    assert payload["results"][0]["citation_id"]
+    assert payload["results"][0]["retrieval_method"].endswith("rerank")
+    assert citations[0].chunk_id == results[0].chunk.chunk_id
+    assert event.event_type == "rag_retrieval"
+    assert event.args["query"] == "release live eval cited evidence trace"
+    assert event.args["top_k"] == 2
+    assert event.args["results"][0]["score"] >= 0
+
+
+def test_rag_verifies_answer_support_against_retrieved_chunks(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("AGENT_STATE_DB_PATH", str(tmp_path / "agent.sqlite3"))
+    monkeypatch.setenv("AGENT_EMBEDDING_MODEL_PATH", str(tmp_path / "missing-embedding-model"))
+    doc = tmp_path / "rag.md"
+    doc.write_text(
+        "# Citation Verifier\n\nCitation verifier checks that answer citations come from retrieved chunks.\n",
+        encoding="utf-8",
+    )
+
+    index_document_paths(str(doc), force=True)
+    results = search_knowledge_records("citation verifier retrieved chunks", limit=1)
+    citation_id = results[0].chunk.citation_id
+
+    supported = verify_answer_against_retrieved_chunks(
+        f"Citation verifier checks retrieved chunks [{citation_id}].",
+        results,
+    )
+    unsupported = verify_answer_against_retrieved_chunks(
+        f"Database migrations are automatically deployed [{citation_id}].",
+        results,
+    )
+
+    assert supported["ok"] is True
+    assert supported["supported"] is True
+    assert unsupported["ok"] is False
+    assert unsupported["unsupported"] == [citation_id]
 
 
 def test_git_safety_creates_isolated_branch(tmp_path) -> None:
