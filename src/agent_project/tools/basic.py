@@ -46,6 +46,7 @@ from agent_project.tools.rag import (
     answer_with_citations,
     index_documents,
     search_knowledge,
+    verify_answer_against_retrieved_chunks_tool,
     verify_answer_citations,
 )
 from agent_project.tools.shell import execute_shell_command
@@ -171,6 +172,7 @@ def get_tools():
         search_knowledge,
         answer_with_citations,
         verify_answer_citations,
+        verify_answer_against_retrieved_chunks_tool,
         list_skills,
         read_skill,
         read_skill_file,

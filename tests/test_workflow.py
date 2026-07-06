@@ -11,6 +11,7 @@ from agent_project.workflow import (
     _policy_violation_from_trace_events,
     _planner_node,
     _parse_json_object,
+    _rag_trace_events_from_tool_results,
     _reflector_node,
     _retry_target_for_failure,
     _router_node,
@@ -385,6 +386,24 @@ def test_trace_events_from_executor_messages_extracts_tool_calls() -> None:
     assert events[0].tool == "search_knowledge"
     assert events[0].args == {"query": "agent tracing"}
     assert events[1].content == "result text"
+
+
+def test_rag_trace_uses_actual_tool_result_payload() -> None:
+    content = "\n".join(
+        [
+            "Knowledge results (/tmp/agent.sqlite3):",
+            "1. score=0.900 method=lexical_rerank [docs/a.md#intro] title=a heading=Intro",
+            "   chunk text",
+        ]
+    )
+    messages = [ToolMessage(content=content, name="search_knowledge", tool_call_id="call-1")]
+
+    events = _rag_trace_events_from_tool_results({"user_input": "unrelated query"}, messages)
+
+    assert len(events) == 1
+    assert events[0].args["query"] == ""
+    assert events[0].args["results"][0]["citation_id"] == "docs/a.md#intro"
+    assert events[0].args["results"][0]["score"] == 0.9
 
 
 def test_coerce_plan_limits_and_normalizes_steps() -> None:

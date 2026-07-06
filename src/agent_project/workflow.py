@@ -15,7 +15,7 @@ from agent_project.llms import build_chat_model
 from agent_project.tools import get_tools_for_task
 from agent_project.tools.human_gate import create_human_gate_request
 from agent_project.tools.memory import reflection_memory_context, store_reflection_memory
-from agent_project.tools.rag import rag_search_trace_event, search_knowledge_records
+from agent_project.tools.rag import extract_citation_ids, verify_answer_against_retrieved_payload
 from agent_project.tracing import TraceEvent
 
 
@@ -517,6 +517,31 @@ def _verifier_node(model: Any):
                 "trace_events": _append_event(
                     state,
                     TraceEvent(event_type="verifier", content=report["summary"], ok=True),
+                ),
+            }
+        rag_check = _deterministic_rag_verification(state)
+        if rag_check is not None and not rag_check["ok"]:
+            verifier_failures = state.get("verifier_failures", 0) + 1
+            report = _node_report(
+                "verifier",
+                "RAG citation verification failed.",
+                status="failed",
+                needs_human=False,
+                data={"ok": False, "verifier_failures": verifier_failures, "rag_check": rag_check},
+            )
+            return {
+                **state,
+                "status": "failed",
+                "verifier_failures": verifier_failures,
+                "node_reports": _append_node_report(state, report),
+                "trace_events": _append_event(
+                    state,
+                    TraceEvent(
+                        event_type="verifier",
+                        content="RAG citation verification failed.",
+                        args={"rag_check": rag_check},
+                        ok=False,
+                    ),
                 ),
             }
         fallback_ok = state.get("status") != "failed" and bool(state.get("final_answer", "").strip())
@@ -1201,8 +1226,6 @@ def _trace_events_from_executor_messages(messages: list[Any]) -> list[TraceEvent
 
 def _rag_trace_events_from_tool_results(state: AgentState, messages: list[Any]) -> list[TraceEvent]:
     events: list[TraceEvent] = []
-    query = state.get("user_input", "")
-    limit = 5
     for message in messages:
         if getattr(message, "type", "") != "tool":
             continue
@@ -1210,20 +1233,87 @@ def _rag_trace_events_from_tool_results(state: AgentState, messages: list[Any]) 
         if name not in {"search_knowledge", "answer_with_citations"}:
             continue
         content = _message_content_to_text(getattr(message, "content", ""))
+        payload = _rag_payload_from_tool_result(content)
         if content.startswith("No knowledge chunks found") or content.startswith("No grounded evidence found"):
             events.append(
                 TraceEvent(
                     event_type="rag_retrieval",
                     tool=name,
-                    content=f"query={query.strip()} top_k={limit} results=0",
-                    args={"query": query.strip(), "top_k": limit, "results": []},
+                    content="query= top_k=0 results=0",
+                    args={"query": "", "top_k": 0, "results": []},
                     ok=True,
                 )
             )
             continue
-        results = search_knowledge_records(query, limit=limit)
-        events.append(rag_search_trace_event(query, limit, results))
+        events.append(
+            TraceEvent(
+                event_type="rag_retrieval",
+                tool=name,
+                content=f"query={payload['query']} top_k={payload['top_k']} results={len(payload['results'])}",
+                args=payload,
+                ok=True,
+            )
+        )
     return events
+
+
+def _rag_payload_from_tool_result(content: str) -> dict[str, Any]:
+    results: list[dict[str, Any]] = []
+    for index, line in enumerate(content.splitlines(), start=1):
+        match = re.search(
+            r"^\s*(?:[-*]|\d+\.)\s+"
+            r"(?:score=(?P<score>[0-9.]+)\s+)?"
+            r"(?:method=(?P<method>[a-zA-Z0-9_]+)\s+)?"
+            r"\[(?P<citation>[^\]]+)\]"
+            r"(?:\s+source=(?P<source>\S+))?"
+            r"(?:\s+title=(?P<title>.*?))?"
+            r"(?:\s+heading=(?P<heading>.*))?$",
+            line,
+        )
+        if not match:
+            continue
+        try:
+            score = float(match.group("score") or 0.0)
+        except ValueError:
+            score = 0.0
+        results.append(
+            {
+                "rank": len(results) + 1,
+                "score": score,
+                "retrieval_method": match.group("method") or "tool_result",
+                "source": (match.group("source") or "").strip(),
+                "title": (match.group("title") or "").strip(),
+                "heading_path": (match.group("heading") or "").strip(),
+                "chunk_id": "",
+                "citation_id": match.group("citation").strip(),
+                "snippet": _following_snippet(content.splitlines(), index),
+            }
+        )
+    return {"query": "", "top_k": len(results), "results": results}
+
+
+def _following_snippet(lines: list[str], one_based_index: int) -> str:
+    if one_based_index >= len(lines):
+        return ""
+    candidate = lines[one_based_index].strip()
+    return candidate[:500]
+
+
+def _deterministic_rag_verification(state: AgentState) -> dict[str, Any] | None:
+    if not (state.get("retrieval_needed") or state.get("task_type") == "rag_qa"):
+        return None
+    answer = state.get("final_answer", "")
+    if not extract_citation_ids(answer):
+        return {"ok": False, "reason": "no citations used", "used": [], "allowed": []}
+    retrieval_events = [
+        event for event in state.get("trace_events", []) if event.event_type == "rag_retrieval"
+    ]
+    payload = {"results": []}
+    for event in retrieval_events:
+        payload["results"].extend(event.args.get("results", []))
+    if not payload["results"]:
+        return {"ok": False, "reason": "no retrieved chunks available", "used": [], "allowed": []}
+    return verify_answer_against_retrieved_payload(answer, payload)
 
 
 def _node_report(

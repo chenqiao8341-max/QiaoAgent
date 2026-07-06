@@ -23,6 +23,8 @@ from agent_project.tools.rag import (
     search_knowledge_payload,
     search_knowledge_records,
     verify_answer_against_retrieved_chunks,
+    verify_answer_against_retrieved_payload,
+    verify_answer_against_retrieved_chunks_tool,
     verify_citation_ids,
 )
 from agent_project.tools.storage import connect
@@ -227,6 +229,37 @@ def test_rag_verifies_answer_support_against_retrieved_chunks(tmp_path, monkeypa
     assert supported["supported"] is True
     assert unsupported["ok"] is False
     assert unsupported["unsupported"] == [citation_id]
+
+
+def test_rag_verifier_tool_checks_retrieved_payload_support() -> None:
+    payload = {
+        "results": [
+            {
+                "citation_id": "docs/rag.md#verifier",
+                "chunk_id": "chunk-1",
+                "source_id": "source-1",
+                "source_type": "docs",
+                "source": "/docs/rag.md",
+                "title": "rag",
+                "heading_path": "Citation Verifier",
+                "snippet": "Citation verifier checks retrieved chunks and rejects unsupported claims.",
+            }
+        ]
+    }
+
+    result = verify_answer_against_retrieved_payload(
+        "Citation verifier checks retrieved chunks [docs/rag.md#verifier].",
+        payload,
+    )
+    tool_result = verify_answer_against_retrieved_chunks_tool.invoke(
+        {
+            "answer": "Citation verifier checks retrieved chunks [docs/rag.md#verifier].",
+            "retrieved_payload_json": json.dumps(payload),
+        }
+    )
+
+    assert result["ok"] is True
+    assert "Citation support verified" in tool_result
 
 
 def test_git_safety_creates_isolated_branch(tmp_path) -> None:

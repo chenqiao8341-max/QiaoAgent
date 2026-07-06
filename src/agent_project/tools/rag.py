@@ -673,6 +673,58 @@ def verify_answer_against_retrieved_chunks(
     }
 
 
+def _chunk_from_retrieved_payload_item(item: dict[str, Any]) -> KnowledgeChunk:
+    return KnowledgeChunk(
+        chunk_id=str(item.get("chunk_id") or item.get("citation_id") or ""),
+        source_id=str(item.get("source_id") or item.get("source") or ""),
+        source_type=_coerce_source_type(str(item.get("source_type") or "docs")),
+        path=str(item.get("path") or item.get("source") or ""),
+        url=str(item.get("url") or ""),
+        title=str(item.get("title") or ""),
+        heading_path=str(item.get("heading_path") or ""),
+        citation_id=str(item.get("citation_id") or ""),
+        content_hash=str(item.get("content_hash") or ""),
+        text=str(item.get("text") or item.get("snippet") or ""),
+        indexed_at=str(item.get("indexed_at") or ""),
+    )
+
+
+def retrieved_chunks_from_payload(payload: dict[str, Any] | list[dict[str, Any]]) -> list[RetrievedChunk]:
+    raw_results: Any = payload.get("results", []) if isinstance(payload, dict) else payload
+    if not isinstance(raw_results, list):
+        return []
+    results: list[RetrievedChunk] = []
+    for index, item in enumerate(raw_results, start=1):
+        if not isinstance(item, dict):
+            continue
+        chunk = _chunk_from_retrieved_payload_item(item)
+        if not chunk.citation_id:
+            continue
+        try:
+            score = float(item.get("score", item.get("query_score", 0.0)) or 0.0)
+        except (TypeError, ValueError):
+            score = 0.0
+        results.append(
+            RetrievedChunk(
+                chunk=chunk,
+                score=score,
+                rank=int(item.get("rank") or index),
+                retrieval_method=str(item.get("retrieval_method") or "payload"),
+            )
+        )
+    return results
+
+
+def verify_answer_against_retrieved_payload(
+    answer: str,
+    retrieved_payload: dict[str, Any] | list[dict[str, Any]],
+) -> dict[str, Any]:
+    return verify_answer_against_retrieved_chunks(
+        answer,
+        retrieved_chunks_from_payload(retrieved_payload),
+    )
+
+
 def rag_search_trace_event(query: str, limit: int, results: list[RetrievedChunk]) -> TraceEvent:
     return TraceEvent(
         event_type="rag_retrieval",
@@ -738,3 +790,20 @@ def verify_answer_citations(answer: str, allowed_citation_ids: str) -> str:
     if result["ok"]:
         return f"Citations verified. used={result['used']}"
     return f"Citation verification failed. missing={result['missing']} allowed={result['allowed']}"
+
+
+@tool
+def verify_answer_against_retrieved_chunks_tool(answer: str, retrieved_payload_json: str) -> str:
+    """Verify answer citations and support against retrieved chunk payload JSON."""
+    try:
+        payload = json.loads(retrieved_payload_json)
+    except json.JSONDecodeError as exc:
+        return f"Citation support verification failed. invalid_payload={exc}"
+    result = verify_answer_against_retrieved_payload(answer, payload)
+    if result["ok"]:
+        return f"Citation support verified. used={result['used']}"
+    return (
+        "Citation support verification failed. "
+        f"missing={result.get('missing', [])} unsupported={result.get('unsupported', [])} "
+        f"reason={result.get('reason', '')}"
+    )
