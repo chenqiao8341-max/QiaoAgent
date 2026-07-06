@@ -16,6 +16,7 @@ from agent_project.llms import build_chat_model
 from agent_project.tools import get_tools_for_task
 from agent_project.tools.human_gate import create_human_gate_request
 from agent_project.tools.memory import reflection_memory_context, store_reflection_memory
+from agent_project.tools.work_management import capture_work_message
 from agent_project.tools.rag import extract_citation_ids, verify_answer_against_retrieved_payload
 from agent_project.tracing import TraceEvent
 
@@ -385,6 +386,32 @@ def _executor_node(model: Any, settings: Settings, system_prompt: str):
     def run(state: AgentState) -> AgentState:
         if state.get("status") == "need_user":
             return state
+        if state.get("task_type") == "work_message":
+            bounded = _execute_bounded_work_message(state)
+            report = _node_report(
+                "executor",
+                bounded["answer"],
+                status="running" if bounded["ok"] else "failed",
+                needs_human=False,
+                data={"step_results": bounded["step_results"]},
+            )
+            return {
+                **state,
+                "current_step": 1,
+                "step_results": [*state.get("step_results", []), *bounded["step_results"]],
+                "tool_results": [
+                    *state.get("tool_results", []),
+                    {"ok": bounded["ok"], "content": bounded["answer"]},
+                ],
+                "final_answer": bounded["answer"],
+                "status": "running" if bounded["ok"] else "failed",
+                "error_type": "" if bounded["ok"] else "WorkMessageExecutionError",
+                "node_reports": _append_node_report(state, report),
+                "trace_events": _append_event(
+                    {**state, "trace_events": [*state.get("trace_events", []), *bounded["tool_events"]]},
+                    TraceEvent(event_type="executor", content=bounded["answer"], ok=bounded["ok"]),
+                ),
+            }
 
         started = time.monotonic()
         tool_trace_events: list[TraceEvent] = []
@@ -393,8 +420,7 @@ def _executor_node(model: Any, settings: Settings, system_prompt: str):
         status: WorkflowStatus = "running"
         error_type = ""
 
-        tools = get_tools_for_task(state.get("task_type", "chat"), state.get("route", "self"))
-        executor = _build_react_executor(model, tools, f"{system_prompt}\n\n{EXECUTOR_PROMPT}")
+        all_task_tools = get_tools_for_task(state.get("task_type", "chat"), state.get("route", "self"))
         plan = state.get("plan", []) or [{"step": 1, "action": "execute", "description": "Answer directly."}]
 
         for index, step in enumerate(plan):
@@ -410,10 +436,13 @@ def _executor_node(model: Any, settings: Settings, system_prompt: str):
                 break
 
             prompt = _executor_step_prompt(state, step, step_index=index)
+            step_tool_names = _step_tool_names(state, step)
+            step_tools = [tool for tool in all_task_tools if tool.name in step_tool_names]
+            executor = _build_react_executor(model, step_tools, f"{system_prompt}\n\n{EXECUTOR_PROMPT}")
             try:
                 result = executor.invoke(
                     {"messages": [HumanMessage(content=prompt)]},
-                    config={"recursion_limit": settings.agent_recursion_limit},
+                    config={"recursion_limit": min(settings.agent_recursion_limit, 8)},
                 )
             except Exception as exc:
                 status = "failed"
@@ -501,6 +530,56 @@ def _executor_node(model: Any, settings: Settings, system_prompt: str):
     return run
 
 
+def _execute_bounded_work_message(state: AgentState | dict[str, Any]) -> dict[str, Any]:
+    user_input = str(state.get("user_input", ""))
+    tool_args = {"content": user_input, "source": "agent", "sender": ""}
+    call_event = TraceEvent(
+        event_type="tool_call",
+        tool="capture_work_message",
+        args=tool_args,
+        ok=None,
+        node="executor",
+        tool_call_id="bounded-work-message",
+    )
+    try:
+        answer = capture_work_message.invoke(tool_args)
+    except Exception as exc:
+        answer = str(exc)
+        result_event = TraceEvent(
+            event_type="tool_result",
+            tool="capture_work_message",
+            content=answer,
+            ok=False,
+            node="executor",
+            raw_error=type(exc).__name__,
+            tool_call_id="bounded-work-message",
+        )
+        ok = False
+    else:
+        result_event = TraceEvent(
+            event_type="tool_result",
+            tool="capture_work_message",
+            content=answer,
+            ok=True,
+            node="executor",
+            tool_call_id="bounded-work-message",
+        )
+        ok = True
+    return {
+        "ok": ok,
+        "answer": answer,
+        "tool_events": [call_event, result_event],
+        "step_results": [
+            {
+                "step": 1,
+                "action": "route_work",
+                "ok": ok,
+                "content": answer,
+            }
+        ],
+    }
+
+
 def _verifier_node(model: Any):
     def run(state: AgentState) -> AgentState:
         if state.get("needs_human"):
@@ -518,6 +597,28 @@ def _verifier_node(model: Any):
                 "trace_events": _append_event(
                     state,
                     TraceEvent(event_type="verifier", content=report["summary"], ok=True),
+                ),
+            }
+        work_message_check = _deterministic_work_message_verification(state)
+        if work_message_check is not None:
+            report = _node_report(
+                "verifier",
+                work_message_check["reason"],
+                status="done" if work_message_check["ok"] else "failed",
+                needs_human=False,
+                data={"ok": work_message_check["ok"], "verifier_failures": state.get("verifier_failures", 0)},
+            )
+            return {
+                **state,
+                "status": "done" if work_message_check["ok"] else "failed",
+                "node_reports": _append_node_report(state, report),
+                "trace_events": _append_event(
+                    state,
+                    TraceEvent(
+                        event_type="verifier",
+                        content=work_message_check["reason"],
+                        ok=work_message_check["ok"],
+                    ),
                 ),
             }
         rag_check = _deterministic_rag_verification(state)
@@ -710,7 +811,7 @@ def _finalizer_node(model: Any):
         if state.get("status") == "need_user":
             fallback_answer = _confirmation_answer(state)
         elif state.get("status") == "failed":
-            fallback_answer = state.get("final_answer") or (
+            fallback_answer = _rag_failure_answer(state) or state.get("final_answer") or (
                 "Workflow failed before completing the task. "
                 f"error_type: {state.get('error_type', '') or 'unknown'}"
             )
@@ -731,6 +832,8 @@ Do not invent tool results. Preserve required human gate prompts when needs_huma
             fallback={"final_answer": fallback_answer, "status": state.get("status", "done")},
         )
         answer = str(payload.get("final_answer") or fallback_answer)
+        if state.get("status") == "failed" and _rag_failure_answer(state):
+            answer = fallback_answer
         human_gate_id = state.get("human_gate_id", "")
         if state.get("needs_human") and not human_gate_id:
             human_gate_id = create_human_gate_request(
@@ -847,9 +950,7 @@ def build_plan(
     if task_type == "work_message":
         steps = [
             "Capture and classify the work message.",
-            "Match it to an existing work item using vector search when available.",
-            "Create or update a work task with the selected route.",
-            "Report the matched work, route, priority, and next action.",
+            "Report the matched work, route, priority, and next action from the capture result.",
         ]
     elif route == "codex":
         steps = [
@@ -904,6 +1005,8 @@ def _after_planner(state: AgentState) -> str:
 
 
 def _after_verifier(state: AgentState) -> str:
+    if _has_rag_verification_failure(state):
+        return "finalize"
     return "reflect" if state.get("status") == "failed" else "finalize"
 
 
@@ -916,6 +1019,20 @@ def _after_reflector(state: AgentState) -> str:
     if retry_target == "executor":
         return "executor"
     return "finalize"
+
+
+def _has_rag_verification_failure(state: AgentState | dict[str, Any]) -> bool:
+    if state.get("task_type") != "rag_qa" and not state.get("retrieval_needed"):
+        return False
+    for report in state.get("node_reports", []):
+        if not isinstance(report, dict):
+            continue
+        data = report.get("data", {})
+        if isinstance(data, dict) and isinstance(data.get("rag_check"), dict):
+            return True
+        if report.get("summary") == "RAG citation verification failed.":
+            return True
+    return False
 
 
 def _state_user_input(state: AgentState) -> str:
@@ -978,6 +1095,7 @@ def _executor_prompt(state: AgentState) -> str:
 def _executor_step_prompt(state: AgentState, step: dict[str, Any], step_index: int) -> str:
     plan = state.get("plan", [])
     policy = policy_for_task(state.get("task_type", "chat"), state.get("route", "self"))
+    allowed_tools = _step_tool_names(state, step)
     prior_results = state.get("step_results", [])
     return "\n".join(
         [
@@ -986,7 +1104,7 @@ def _executor_step_prompt(state: AgentState, step: dict[str, Any], step_index: i
             f"Router: task_type={state.get('task_type')} route={state.get('route')} "
             f"risk={state.get('risk')} difficulty={state.get('difficulty')}",
             f"Execution policy: max_tool_calls={policy.max_tool_calls} max_seconds={policy.max_seconds}",
-            "Allowed tools: " + ", ".join(sorted(policy.allowed_tools)),
+            "Allowed tools: " + ", ".join(sorted(allowed_tools)),
             "",
             f"Current step {step_index + 1}/{max(len(plan), 1)}:",
             f"{step.get('step', step_index + 1)}. [{step.get('action', 'execute')}] {step.get('description', '')}",
@@ -995,9 +1113,35 @@ def _executor_step_prompt(state: AgentState, step: dict[str, Any], step_index: i
             _format_step_results(prior_results),
             "",
             "Execute only the current step. Do not perform later plan steps.",
+            "Use at most one tool call unless the current step explicitly requires more.",
             "Return the current step result and any user-facing conclusion if this is the final step.",
         ]
     )
+
+
+def _step_tool_names(state: AgentState | dict[str, Any], step: dict[str, Any]) -> set[str]:
+    task_type = str(state.get("task_type", "chat"))
+    route = str(state.get("route", "self"))
+    action = str(step.get("action", "execute"))
+    description = str(step.get("description", "")).lower()
+    policy = policy_for_task(task_type, route)
+
+    if task_type == "work_message":
+        if action == "route_work" or "capture" in description or "classify" in description:
+            return {"capture_work_message"}
+        if "vector" in description or "match" in description:
+            return {"search_work_record_vectors"}
+        if "task" in description:
+            return {"create_work_task", "update_work_task"}
+        return {"list_work_inbox", "list_work_tasks"}
+    if task_type == "rag_qa":
+        if action == "retrieve_context":
+            return {"search_knowledge", "answer_with_citations"}
+        if action == "verify":
+            return {"verify_answer_citations", "verify_answer_against_retrieved_chunks_tool"}
+    if task_type == "chat":
+        return set(policy.allowed_tools)
+    return set(policy.allowed_tools)
 
 
 def _planner_user_prompt(state: AgentState, fallback_plan: list[dict[str, Any]]) -> str:
@@ -1091,6 +1235,25 @@ def _confirmation_answer(state: AgentState) -> str:
         f"risk: {state.get('risk')}\n"
         "Planned steps:\n"
         f"{_format_plan(state.get('plan', []))}"
+    )
+
+
+def _rag_failure_answer(state: AgentState) -> str:
+    if state.get("task_type") != "rag_qa" and not state.get("retrieval_needed"):
+        return ""
+    reports = state.get("node_reports", [])
+    rag_reasons = []
+    for report in reports:
+        data = report.get("data", {}) if isinstance(report, dict) else {}
+        rag_check = data.get("rag_check") if isinstance(data, dict) else None
+        if isinstance(rag_check, dict):
+            reason = str(rag_check.get("reason") or rag_check.get("missing") or rag_check.get("unsupported") or "")
+            if reason:
+                rag_reasons.append(reason)
+    reason_text = "; ".join(rag_reasons) or "citation verification failed"
+    return (
+        "I could not verify the cited answer against the retrieved knowledge chunks. "
+        f"reason: {reason_text}"
     )
 
 
@@ -1227,6 +1390,7 @@ def _trace_events_from_executor_messages(messages: list[Any]) -> list[TraceEvent
                     event_type="tool_call",
                     tool=name,
                     args=args,
+                    tool_call_id=str(call.get("id") or ""),
                     ok=None,
                 )
             )
@@ -1237,6 +1401,7 @@ def _trace_events_from_executor_messages(messages: list[Any]) -> list[TraceEvent
                     event_type="tool_result",
                     tool=name,
                     content=_message_content_to_text(getattr(message, "content", "")),
+                    tool_call_id=str(getattr(message, "tool_call_id", "")),
                     ok=True,
                 )
             )
@@ -1245,6 +1410,12 @@ def _trace_events_from_executor_messages(messages: list[Any]) -> list[TraceEvent
 
 def _rag_trace_events_from_tool_results(state: AgentState, messages: list[Any]) -> list[TraceEvent]:
     events: list[TraceEvent] = []
+    call_args_by_id: dict[str, dict[str, Any]] = {}
+    for message in messages:
+        for call in getattr(message, "tool_calls", None) or []:
+            if isinstance(call, dict) and call.get("name") in {"search_knowledge", "answer_with_citations"}:
+                args = call.get("args") if isinstance(call.get("args"), dict) else {}
+                call_args_by_id[str(call.get("id") or "")] = args
     for message in messages:
         if getattr(message, "type", "") != "tool":
             continue
@@ -1253,13 +1424,16 @@ def _rag_trace_events_from_tool_results(state: AgentState, messages: list[Any]) 
             continue
         content = _message_content_to_text(getattr(message, "content", ""))
         payload = _rag_payload_from_tool_result(content)
+        call_args = call_args_by_id.get(str(getattr(message, "tool_call_id", "")), {})
+        payload["query"] = str(call_args.get("query") or payload.get("query") or "")
+        payload["top_k"] = int(call_args.get("limit") or call_args.get("top_k") or payload.get("top_k") or 0)
         if content.startswith("No knowledge chunks found") or content.startswith("No grounded evidence found"):
             events.append(
                 TraceEvent(
                     event_type="rag_retrieval",
                     tool=name,
                     content="query= top_k=0 results=0",
-                    args={"query": "", "top_k": 0, "results": []},
+                    args={**payload, "results": []},
                     ok=True,
                 )
             )
@@ -1333,6 +1507,17 @@ def _deterministic_rag_verification(state: AgentState) -> dict[str, Any] | None:
     if not payload["results"]:
         return {"ok": False, "reason": "no retrieved chunks available", "used": [], "allowed": []}
     return verify_answer_against_retrieved_payload(answer, payload)
+
+
+def _deterministic_work_message_verification(state: AgentState) -> dict[str, Any] | None:
+    if state.get("task_type") != "work_message":
+        return None
+    answer = state.get("final_answer", "")
+    ok = "Inbox message" in answer and "route:" in answer and "priority:" in answer
+    return {
+        "ok": ok,
+        "reason": "work message captured with route and priority" if ok else "missing work route evidence",
+    }
 
 
 def _node_report(

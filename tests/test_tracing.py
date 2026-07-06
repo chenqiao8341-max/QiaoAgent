@@ -3,6 +3,13 @@ from __future__ import annotations
 from agent_project.tracing import TraceEvent, TraceStore
 
 
+def test_agent_result_status_can_mark_trace_failure() -> None:
+    from agent_project.agent import _trace_success_from_result
+
+    assert _trace_success_from_result({"status": "done"}) is True
+    assert _trace_success_from_result({"status": "failed"}) is False
+
+
 def test_trace_store_round_trip(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("AGENT_STATE_DB_PATH", str(tmp_path / "agent.sqlite3"))
     trace = TraceStore(trace_id="trace-test")

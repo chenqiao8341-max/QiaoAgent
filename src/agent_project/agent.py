@@ -164,7 +164,11 @@ def invoke_agent(user_input: str, settings: Settings | None = None) -> str:
     for event in result.get("trace_events", []):
         trace.add_event(event)
     answer = result.get("final_answer") or message_content_to_text(result["messages"][-1].content)
-    trace.finish(answer, success=True)
+    trace.finish(
+        answer,
+        success=_trace_success_from_result(result),
+        error_type="" if _trace_success_from_result(result) else str(result.get("error_type", "")),
+    )
     return answer
 
 
@@ -228,3 +232,7 @@ def _model_name(settings: Settings) -> str:
     if settings.model_provider == "anthropic":
         return settings.anthropic_model
     return settings.openai_model
+
+
+def _trace_success_from_result(result: dict[str, Any]) -> bool:
+    return result.get("status") != "failed"

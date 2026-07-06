@@ -8,6 +8,9 @@ from agent_project.workflow import (
     _executor_human_gate_reason,
     _executor_prompt,
     _executor_step_prompt,
+    _execute_bounded_work_message,
+    _finalizer_node,
+    _step_tool_names,
     _policy_violation_from_trace_events,
     _planner_node,
     _parse_json_object,
@@ -44,6 +47,20 @@ def test_workflow_router_classifies_work_message() -> None:
     assert route == "self"
     assert risk == "low"
     assert difficulty == "low"
+
+
+def test_workflow_work_message_plan_is_bounded() -> None:
+    plan = build_plan(
+        user_input="飞书消息：今天医疗翻译服务 nginx timeout。",
+        task_type="work_message",
+        route="self",
+        risk="low",
+        difficulty="low",
+    )
+
+    assert len(plan) <= 3
+    assert plan[0]["action"] == "route_work"
+    assert all("index_work_record_vectors" not in step["description"] for step in plan)
 
 
 def test_workflow_router_marks_rag_questions_for_retrieval() -> None:
@@ -161,6 +178,38 @@ def test_executor_step_prompt_limits_context_to_one_plan_step() -> None:
     assert "Allowed tools:" in prompt
     assert "capture_work_message" in prompt
     assert "execute_shell_command" not in prompt
+
+
+def test_step_tool_names_are_action_scoped() -> None:
+    route_tools = _step_tool_names(
+        {"task_type": "work_message", "route": "self"},
+        {"action": "route_work", "description": "Capture message."},
+    )
+    report_tools = _step_tool_names(
+        {"task_type": "work_message", "route": "self"},
+        {"action": "execute", "description": "Report route."},
+    )
+
+    assert route_tools == {"capture_work_message"}
+    assert "capture_work_message" not in report_tools
+
+
+def test_bounded_work_message_executor_captures_once(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("AGENT_STATE_DB_PATH", str(tmp_path / "agent.sqlite3"))
+    monkeypatch.setenv("AGENT_WORK_RECORD_PATH", str(tmp_path / "aaa-work.md"))
+    (tmp_path / "aaa-work.md").write_text("# 医疗翻译服务\n状态：关注 nginx timeout\n", encoding="utf-8")
+
+    result = _execute_bounded_work_message(
+        {
+            "user_input": "飞书消息：今天医疗翻译服务 nginx timeout。",
+            "task_type": "work_message",
+            "route": "self",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["tool_events"][0].tool == "capture_work_message"
+    assert len([event for event in result["tool_events"] if event.event_type == "tool_call"]) == 1
 
 
 def test_policy_violation_from_trace_events_counts_tool_calls() -> None:
@@ -299,6 +348,65 @@ def test_verifier_treats_done_with_not_ok_as_failure() -> None:
     assert _after_verifier(state) == "reflect"
 
 
+def test_verifier_accepts_bounded_work_message_result() -> None:
+    verifier = _verifier_node(_FakeJsonModel('{"status": "failed", "ok": false, "reason": "ignored"}'))
+
+    state = verifier(
+        {
+            "task_type": "work_message",
+            "final_answer": "Inbox message 1 captured.\nroute: codex\npriority: high",
+            "status": "running",
+            "verifier_failures": 0,
+        }
+    )
+
+    assert state["status"] == "done"
+    assert state["verifier_failures"] == 0
+
+
+def test_finalizer_replaces_failed_rag_answer_with_verification_failure() -> None:
+    finalizer = _finalizer_node(_FakeJsonModel("{}"))
+
+    state = finalizer(
+        {
+            "task_type": "rag_qa",
+            "status": "failed",
+            "error_type": "RagCitationVerification",
+            "final_answer": "Bad cited answer [1].",
+            "node_reports": [
+                {
+                    "node": "verifier",
+                    "summary": "RAG citation verification failed.",
+                    "status": "failed",
+                    "needs_human": False,
+                    "data": {"rag_check": {"reason": "unsupported citation"}},
+                }
+            ],
+        }
+    )
+
+    assert "could not verify the cited answer" in state["final_answer"]
+    assert "Bad cited answer" not in state["final_answer"]
+
+
+def test_rag_citation_failure_finalizes_without_retry_loop() -> None:
+    state = {
+        "task_type": "rag_qa",
+        "status": "failed",
+        "node_reports": [
+            {
+                "node": "verifier",
+                "summary": "RAG citation verification failed.",
+                "status": "failed",
+                "needs_human": False,
+                "data": {"rag_check": {"ok": False}},
+            }
+        ],
+    }
+
+    assert _after_verifier(state) == "finalize"
+
+
 def test_verifier_requests_human_on_third_failure_and_skips_reflector() -> None:
     verifier = _verifier_node(_FakeJsonModel('{"status": "failed", "ok": false, "reason": "still wrong"}'))
 
@@ -408,12 +516,26 @@ def test_rag_trace_uses_actual_tool_result_payload() -> None:
             "   chunk text",
         ]
     )
-    messages = [ToolMessage(content=content, name="search_knowledge", tool_call_id="call-1")]
+    messages = [
+        AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "search_knowledge",
+                    "args": {"query": "actual query", "limit": 3},
+                    "id": "call-1",
+                    "type": "tool_call",
+                }
+            ],
+        ),
+        ToolMessage(content=content, name="search_knowledge", tool_call_id="call-1"),
+    ]
 
     events = _rag_trace_events_from_tool_results({"user_input": "unrelated query"}, messages)
 
     assert len(events) == 1
-    assert events[0].args["query"] == ""
+    assert events[0].args["query"] == "actual query"
+    assert events[0].args["top_k"] == 3
     assert events[0].args["results"][0]["citation_id"] == "docs/a.md#intro"
     assert events[0].args["results"][0]["score"] == 0.9
 
