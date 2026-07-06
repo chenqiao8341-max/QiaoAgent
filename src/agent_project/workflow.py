@@ -6,6 +6,7 @@ import time
 from typing import Any, Literal, TypedDict
 
 from langchain_core.messages import HumanMessage, SystemMessage
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import create_react_agent
 
@@ -130,7 +131,7 @@ def build_workflow_agent(settings: Settings, system_prompt: str):
         },
     )
     graph.add_edge("finalizer", END)
-    return graph.compile()
+    return graph.compile(checkpointer=MemorySaver())
 
 
 def _build_react_executor(model: Any, tools: list[Any], prompt: str):

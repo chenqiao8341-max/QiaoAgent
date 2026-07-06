@@ -28,6 +28,7 @@ from agent_project.tools.rag import (
     search_knowledge_records,
     verify_answer_against_retrieved_chunks,
 )
+from agent_project.tools.work_vectors import preload_work_record_embedding_model
 from agent_project.tracing import TraceEvent, TraceStore
 
 
@@ -43,7 +44,10 @@ def _stream_agent_response(
     try:
         for stream_mode, chunk in agent.stream(
             {"messages": messages, "trace_id": trace.trace_id if trace else ""},
-            config={"recursion_limit": recursion_limit},
+            config={
+                "recursion_limit": recursion_limit,
+                "configurable": {"thread_id": trace.trace_id if trace else "interactive"},
+            },
             stream_mode=["messages", "values"],
         ):
             if stream_mode == "messages":
@@ -268,6 +272,19 @@ def main() -> None:
         if args.command == "verify":
             results = search_knowledge_records(args.query, limit=args.limit)
             print(verify_answer_against_retrieved_chunks(args.answer, results))
+            return
+
+    if argv and argv[0] == "preload":
+        parser = argparse.ArgumentParser(description="Preload local models used by agent tools.")
+        parser.add_argument(
+            "target",
+            choices=["work-embeddings"],
+            help="Model/cache target to preload.",
+        )
+        args = parser.parse_args(argv[1:])
+        load_settings()
+        if args.target == "work-embeddings":
+            print(preload_work_record_embedding_model.invoke({}))
             return
 
     if argv and argv[0] == "human-gates":

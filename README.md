@@ -4,7 +4,7 @@
 
 - OpenAI / Google Gemini / Anthropic / 本地 vLLM provider 切换
 - OpenAI-compatible API 接入，例如 DeepSeek、Kimi、DashScope/Qwen、本地 vLLM
-- LangGraph `create_react_agent`
+- LangGraph `StateGraph` workflow with a bounded ReAct executor inside each plan step
 - Tool calling
 - Codex-style skills：基于 `SKILL.md` 的可插拔任务知识
 - 本地文件读取、目录列表、写入
@@ -14,7 +14,7 @@
 - 轻量浏览器操作：打开网页、抽取正文、列出链接
 - SQLite 长期记忆、工作收件箱、工作任务和持久化任务队列，用于跨会话保存偏好、项目事实和任务状态
 - `/home/qiao/work/aaa-work.md` 工作记录向量检索，用 embedding 辅助判断消息归属哪个项目
-- SQLite Agent trace 记录和离线 eval 底座，用于后续路由、工具选择和任务成功率评测
+- SQLite Agent trace 记录、offline eval 和 live eval，用于路由、工具选择、RAG 引用和任务成功率评测
 - 初步全自动化工作流：显式 LangGraph `StateGraph` 节点 `Router -> Planner -> Executor -> Verifier -> Reflector -> Finalizer`
 - SQLite goal 管理，用于把长任务拆成可迭代的自治工作流
 - 工具执行过程可见化：读取文件、检索网页、执行命令、更新任务时输出进度
@@ -204,6 +204,7 @@ AGENT_SKILL_CATALOG_LIMIT=25
 
 - `list_work_record_items`：读取并解析 `/home/qiao/work/aaa-work.md`。
 - `index_work_record_vectors`：把 `/home/qiao/work/aaa-work.md` 中的工作项写入 SQLite 向量索引。
+- `preload_work_record_embedding_model` / `agent-chat preload work-embeddings`：提前加载 embedding 模型，降低第一次工作消息检索的冷启动延迟。
 - `search_work_record_vectors`：用本地 embedding 模型按语义检索工作项。
 - `capture_work_message`：保存一条手动整理的工作/飞书消息，自动匹配已有工作，生成 `self` / `codex` / `ask_user` / `defer` 路由。
 - `create_work_task`：把 inbox 消息或用户请求转成结构化工作任务。
@@ -250,7 +251,7 @@ HTTPS_PROXY=http://127.0.0.1:17897 HTTP_PROXY=http://127.0.0.1:17897 pip install
 
 ## Tracing 和 Evals
 
-`invoke_agent` 和交互式 `agent-chat` 会把每次调用的基础轨迹写入 SQLite，表包括 `agent_traces` 和 `agent_trace_events`。当前记录 user input、final answer、latency、success/error，后续多节点图或工具回调可以继续追加更细粒度事件。
+`invoke_agent` 和交互式 `agent-chat` 会把每次调用的基础轨迹写入 SQLite，表包括 `agent_traces` 和 `agent_trace_events`。当前记录 user input、final answer、latency、success/error，以及每个事件的 `duration_ms`、`node`、`tool_call_id`、`raw_error`、`prompt_chars` 和 token usage payload。长工具结果仍建议在后续版本落盘保存 full payload path，trace 表里保留摘要和结构化参数。
 
 离线评测集在 `evals/work_agent_v1.jsonl`，共 80 条：
 
@@ -268,7 +269,16 @@ python -m agent_project.evals.runner \
   --report .agent_state/eval_reports/latest.json
 ```
 
-指标包括 `route_accuracy`、`tool_call_accuracy`、`task_success_rate`、`groundedness`、`latency_seconds`、`tokens_or_prompt_chars` 和 `human_intervention_count`。
+offline eval 只读取 dataset 中的 actual 字段，适合回归已有标注；live eval 会真实调用 agent，并从 trace 中抽取 `trace_id`、actual route、actual tools、latency 和 human intervention 次数：
+
+```bash
+python -m agent_project.evals.runner \
+  --dataset evals/work_agent_v1.jsonl \
+  --report .agent_state/eval_reports/live-baseline.json \
+  --live --limit 12 --category rag_qa --fresh-db --save-traces
+```
+
+指标包括 `route_accuracy`、`tool_call_accuracy`、`task_success_rate`、`groundedness`、`latency_seconds`、`tokens_or_prompt_chars` 和 `human_intervention_count`。`task_success_rate` 不再把“有回答”当成功：route 类看路由，tool/RAG 类看 required tools 和引用校验，planning 类看期望片段和结构化计划证据。
 
 ## 全自动化工作流
 
@@ -288,12 +298,25 @@ User Input
 
 - `Router`：用独立 system prompt 调用当前模型，输出 JSON：`task_type`、`route`、`risk`、`difficulty`、`rationale`。
 - `Planner`：用独立 system prompt 调用当前模型，输出最多 5 步 JSON plan；高风险任务会进入 `need_user`，不会自动执行。
-- `Executor`：复用已有 ReAct 工具执行器执行计划，保留现有工具能力和审批机制。
-- `Verifier`：用独立 system prompt 调用当前模型，检查执行结果是否满足计划，输出 `done / failed / need_user`。
+- `Executor`：按 plan step 分段调用内部 ReAct 执行器，每一步只暴露当前 task policy 允许的工具，并检查 `max_tool_calls`、`max_seconds` 和重复文件失败退避。
+- `Verifier`：用独立 system prompt 调用当前模型，检查执行结果是否满足计划；RAG 任务会先做确定性 citation verifier，引用缺失或不支持结论时判失败。
 - `Reflector`：用独立 system prompt 调用当前模型，在失败时生成反思和失败类型。
 - `Finalizer`：用独立 system prompt 调用当前模型，生成最终面向用户的答复。
 
 每个 LLM 节点都要求只输出 JSON；如果模型输出格式错误或调用失败，会回退到确定性规则，保证 workflow 不会因为 JSON 格式波动直接崩溃。每轮 workflow 的节点事件会进入 trace，可通过 `agent_traces` / `agent_trace_events` 查看。
+
+## 私有知识库 RAG
+
+知识库工具在 `tools/rag.py`，CLI 入口是：
+
+```bash
+agent-chat knowledge index docs README.md src/agent_project/tools/basic.py --force
+agent-chat knowledge search "get_tools 工具 注册" --limit 3
+agent-chat knowledge answer "get_tools 工具 注册" --limit 1
+agent-chat knowledge verify "get_tools 工具 注册" "回答文本 [citation_id]"
+```
+
+当前支持 Markdown/text 按标题切分、Python 按函数/类切分、关键词+向量+轻量 rerank 检索。回答必须使用检索结果里的 bracket citation。`verify_answer_against_retrieved_chunks_tool` 会检查 citation ID 是否存在、是否使用引用、引用 chunk 是否和回答有词项支持关系；这不是完整自然语言蕴含模型，因此对复杂推理仍可能保守或漏判。
 
 ## Goal 驱动的自我改进闭环
 

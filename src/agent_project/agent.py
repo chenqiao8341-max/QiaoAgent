@@ -143,7 +143,10 @@ def invoke_agent(user_input: str, settings: Settings | None = None) -> str:
     try:
         result = agent.invoke(
             {"messages": [HumanMessage(content=user_input)], "trace_id": trace.trace_id},
-            config={"recursion_limit": settings.agent_recursion_limit},
+            config={
+                "recursion_limit": settings.agent_recursion_limit,
+                "configurable": {"thread_id": trace.trace_id},
+            },
         )
     except GraphRecursionError:
         answer = (
@@ -187,7 +190,10 @@ def resume_human_gate(gate_id: str, response: str = "approved", settings: Settin
                 "messages": [HumanMessage(content=user_input)],
                 "trace_id": trace.trace_id,
             },
-            config={"recursion_limit": settings.agent_recursion_limit},
+            config={
+                "recursion_limit": settings.agent_recursion_limit,
+                "configurable": {"thread_id": f"human_gate:{gate_id.strip()}"},
+            },
         )
     except GraphRecursionError:
         answer = (

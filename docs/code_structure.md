@@ -152,7 +152,7 @@ SQLite 持久化多步骤任务队列工具。当前暴露 `create_task_queue`�
 
 ### `src/agent_project/tools/__init__.py`
 
-工具模块的导出口。它把 `get_tools` 暴露给外部代码，方便 `agent.py` 用 `from agent_project.tools import get_tools` 导入。
+工具模块的导出口。它把 `get_tools` 和 `get_tools_for_task` 暴露给外部代码。`get_tools()` 返回完整工具列表；`get_tools_for_task(task_type, route)` 会按执行策略裁剪工具集，供 workflow executor 使用。
 
 ### `src/agent_project/agent.py`
 
@@ -162,8 +162,8 @@ agent 的核心组装文件。
 
 1. 定义 `DEFAULT_SYSTEM_PROMPT`，即 agent 的系统提示词。
 2. 用 `build_chat_model()` 创建模型。
-3. 用 `get_tools()` 获取工具。
-4. 用 LangGraph 的 `create_react_agent()` 创建 ReAct agent。
+3. 调用 `build_workflow_agent()` 创建显式 LangGraph `StateGraph`。
+4. 为 invoke/resume 配置 trace 和 LangGraph checkpointer thread id。
 
 `invoke_agent(user_input)` 是一个单次调用入口，适合脚本或 API 层复用。
 
@@ -212,10 +212,10 @@ cli.py main()
     -> load_settings()
     -> build_agent()
       -> build_chat_model()
-      -> get_tools()
-      -> create_react_agent()
+      -> build_workflow_agent()
+      -> StateGraph(Router -> Planner -> Executor -> Verifier -> Reflector -> Finalizer)
     -> _stream_agent_response(agent, messages)
-      -> agent.stream({"messages": messages}, stream_mode=["messages", "values"])
+      -> agent.stream({"messages": messages}, config={"configurable": {"thread_id": trace_id}})
       -> messages 流: message_content_to_text(message_chunk.content)
       -> messages 流: print(text, end="", flush=True)
       -> values 流: latest_messages = chunk["messages"]
@@ -230,6 +230,8 @@ cli.py main()
     -> agent.invoke(...)
     -> message_content_to_text(...)
 ```
+
+Executor 内部仍复用 LangGraph `create_react_agent()`，但 workflow 不再把完整计划一次性交给它。现在会按 plan step 分段调用内部 ReAct executor，并通过 `TaskExecutionPolicy` 限制 allowed tools、最大 tool calls、最大耗时和重复文件失败退避。RAG 任务的 trace 记录真实工具输出中的 query/top_k/retrieved chunk/citation 字段，Verifier 会对最终引用做确定性检查。
 
 ## 修改输出格式应该看哪里
 
