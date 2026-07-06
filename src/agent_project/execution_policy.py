@@ -21,6 +21,7 @@ WORK_MESSAGE_TOOLS = {
     "list_work_record_items",
     "list_work_tasks",
     "update_work_task",
+    "preload_work_record_embedding_model",
     "index_work_record_vectors",
     "search_work_record_vectors",
 }

@@ -10,6 +10,7 @@ from langchain_core.tools import tool
 
 from agent_project.tools.progress import emit_progress
 from agent_project.tools.storage import connect, state_db_path
+from agent_project.work_policy import classify_work_message_policy
 
 
 ROUTES = {"self", "codex", "ask_user", "defer"}
@@ -153,34 +154,8 @@ def _classify_against_record(content: str, items: list[WorkRecordItem]) -> tuple
 
 
 def _route_message(content: str, matched_work: str) -> tuple[str, str, str]:
-    lowered = content.lower()
-    urgent_markers = ["紧急", "马上", "今天", "阻塞", "故障", "挂了", "报错", "timeout", "崩", "失败"]
-    codex_markers = [
-        "代码",
-        "修改",
-        "实现",
-        "bug",
-        "报错",
-        "部署",
-        "nginx",
-        "docker",
-        "服务",
-        "测试",
-        "脚本",
-        "接口",
-        "pipeline",
-    ]
-    ask_markers = ["是否", "吗", "？", "?", "什么时候", "确认", "问一下"]
-    defer_markers = ["记录", "备忘", "之后", "有空", "暂时"]
-
-    priority = "high" if any(marker in lowered for marker in urgent_markers) else "normal"
-    if any(marker in lowered for marker in codex_markers):
-        return "codex", priority, "包含代码、部署、服务或测试信号，适合改写任务后交给 Codex。"
-    if any(marker in lowered for marker in ask_markers) and not matched_work:
-        return "ask_user", priority, "消息像是需要进一步确认，且没有匹配到已有工作。"
-    if any(marker in lowered for marker in defer_markers):
-        return "defer", "low" if priority == "normal" else priority, "消息更像备忘或低紧急度记录。"
-    return "self", priority, "可由 agent 自己整理、更新工作记录或生成下一步。"
+    decision = classify_work_message_policy(content, matched_work=matched_work)
+    return decision.route, decision.priority, decision.rationale
 
 
 def _format_item(item: WorkRecordItem) -> str:

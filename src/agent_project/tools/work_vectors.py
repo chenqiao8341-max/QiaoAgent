@@ -211,6 +211,21 @@ def index_work_record_vectors(force: bool = False) -> str:
 
 
 @tool
+def preload_work_record_embedding_model() -> str:
+    """Preload the configured embedding model used by work record vector search."""
+    settings = load_settings()
+    try:
+        _load_embedding_model(settings.agent_embedding_model_path, settings.agent_embedding_device)
+    except RuntimeError as exc:
+        return f"Cannot preload embedding model: {exc}"
+    return (
+        "Embedding model preloaded.\n"
+        f"model_path: {settings.agent_embedding_model_path}\n"
+        f"device: {settings.agent_embedding_device}"
+    )
+
+
+@tool
 def search_work_record_vectors(query: str, limit: int = 5) -> str:
     """Search work record items by semantic similarity using the local embedding model."""
     clean_query = query.strip()
