@@ -35,6 +35,7 @@ class CodexProbeResult:
     elapsed_seconds: float
     exit_code: int | None
     output: str
+    cwd: str
 
 
 def _path_entries() -> list[Path]:
@@ -53,6 +54,42 @@ def _path_entries() -> list[Path]:
         seen.add(resolved)
         entries.append(resolved)
     return entries
+
+
+def _find_git_worktree(path: Path) -> Path | None:
+    candidates = [path, *path.parents]
+    for candidate in candidates:
+        git_marker = candidate / ".git"
+        if git_marker.exists():
+            return candidate
+    return None
+
+
+def _resolve_probe_cwd() -> Path:
+    configured = os.getenv("AGENT_CODEX_PROBE_CWD", "").strip()
+    if configured:
+        path = Path(configured).expanduser()
+        if path.is_dir():
+            return path.resolve()
+
+    current = Path.cwd().resolve()
+    current_worktree = _find_git_worktree(current)
+    if current_worktree is not None:
+        return current_worktree
+
+    workspace_root = os.getenv("AGENT_WORKSPACE_ROOT", "").strip()
+    if workspace_root:
+        workspace = Path(workspace_root).expanduser()
+        workspace_worktree = _find_git_worktree(workspace.resolve()) if workspace.is_dir() else None
+        if workspace_worktree is not None:
+            return workspace_worktree
+
+    package_repo = Path(__file__).resolve().parents[3]
+    package_worktree = _find_git_worktree(package_repo)
+    if package_worktree is not None:
+        return package_worktree
+
+    return current
 
 
 def discover_codex_commands(include_official: bool = True) -> list[CodexCandidate]:
@@ -122,6 +159,7 @@ def probe_codex_command(
         "never",
         prompt,
     ]
+    probe_cwd = _resolve_probe_cwd()
     start = time.monotonic()
     try:
         completed = subprocess.run(
@@ -131,6 +169,7 @@ def probe_codex_command(
             capture_output=True,
             timeout=timeout,
             check=False,
+            cwd=str(probe_cwd),
         )
         elapsed = time.monotonic() - start
         output = _trim_output(completed.stdout or "", completed.stderr or "")
@@ -142,6 +181,7 @@ def probe_codex_command(
             elapsed_seconds=elapsed,
             exit_code=completed.returncode,
             output=output,
+            cwd=str(probe_cwd),
         )
     except subprocess.TimeoutExpired as exc:
         elapsed = time.monotonic() - start
@@ -154,6 +194,7 @@ def probe_codex_command(
             elapsed_seconds=elapsed,
             exit_code=None,
             output=output,
+            cwd=str(probe_cwd),
         )
     except OSError as exc:
         elapsed = time.monotonic() - start
@@ -165,6 +206,7 @@ def probe_codex_command(
             elapsed_seconds=elapsed,
             exit_code=None,
             output=str(exc),
+            cwd=str(probe_cwd),
         )
 
 
@@ -180,7 +222,7 @@ def _format_results(results: list[CodexProbeResult]) -> str:
         lines.append(
             f"- {result.name}: {result.status}, "
             f"elapsed={result.elapsed_seconds:.1f}s, "
-            f"exit_code={result.exit_code}, path={result.path}"
+            f"exit_code={result.exit_code}, path={result.path}, cwd={result.cwd}"
         )
         if not result.ok:
             reason = next(
@@ -203,7 +245,11 @@ def test_codex_connectivity(
     include_official: bool = True,
     command_names: str = "",
 ) -> str:
-    """Test local codex and codex-proxy-* CLI configurations and return the usable names."""
+    """Test local codex and codex-proxy-* CLI configurations visible on PATH.
+
+    Leave command_names empty to scan every discovered configuration. Set command_names
+    only when the caller intentionally wants to restrict the test to a comma-separated subset.
+    """
     emit_progress("discovering Codex configurations")
     candidates = discover_codex_commands(include_official=include_official)
     if command_names.strip():

@@ -27,6 +27,8 @@ from agent_project.workflow import (
 )
 from langchain_core.messages import AIMessage, ToolMessage
 
+from agent_project.tracing import TraceEvent
+
 
 class _FakeJsonModel:
     def __init__(self, content: str) -> None:
@@ -47,6 +49,85 @@ def test_workflow_router_classifies_work_message() -> None:
     assert route == "self"
     assert risk == "low"
     assert difficulty == "low"
+
+
+def test_workflow_codex_connectivity_request_gets_code_diagnostic_plan() -> None:
+    task_type = classify_task_type("检测codex连接")
+    route, risk, difficulty = classify_route_risk_difficulty("检测codex连接", task_type)
+    plan = build_plan(
+        user_input="检测codex连接",
+        task_type=task_type,
+        route=route,
+        risk=risk,
+        difficulty=difficulty,
+    )
+
+    assert task_type == "code_task"
+    assert route == "self"
+    assert risk == "low"
+    assert "diagnostic" in plan[0]["description"]
+
+
+def test_workflow_router_corrects_non_work_connectivity_misclassification() -> None:
+    state = _router_node(
+        _FakeJsonModel(
+            '{"task_type": "work_message", "route": "self", "risk": "low", '
+            '"difficulty": "low", "project_confidence": 0.0, '
+            '"retrieval_needed": false, "retrieval_scope": "none", '
+            '"rationale": "mistaken work route"}'
+        )
+    )({"messages": [type("Message", (), {"content": "检测codex连接"})()]})
+
+    assert state["task_type"] == "code_task"
+    assert state["route"] == "self"
+    assert state["needs_human"] is False
+
+
+def test_workflow_read_only_diagnostic_request_exposes_diagnostic_tools() -> None:
+    step = {
+        "action": "execute",
+        "description": "Run codex-proxy-anyrouter --help to inspect connectivity.",
+    }
+
+    assert _step_tool_names({"task_type": "code_task", "route": "self", "user_input": "检测codex连接"}, step) == {
+        "test_codex_connectivity"
+    }
+
+
+def test_workflow_named_diagnostic_tool_step_is_action_scoped() -> None:
+    step = {
+        "action": "execute",
+        "description": "Run test_codex_connectivity without command_names so all local configs are scanned.",
+    }
+
+    assert _step_tool_names({"task_type": "code_task", "route": "self"}, step) == {
+        "test_codex_connectivity"
+    }
+
+
+def test_workflow_read_only_diagnostic_verifier_treats_tool_report_as_done() -> None:
+    verifier = _verifier_node(_FakeJsonModel('{"status": "failed", "ok": false, "reason": "tool reported failed"}'))
+    report = 'Available Codex configurations:\n(none)'
+    state = verifier(
+        {
+            "user_input": "检测codex连接",
+            "task_type": "code_task",
+            "route": "self",
+            "status": "running",
+            "final_answer": report,
+            "trace_events": [
+                TraceEvent(
+                    event_type="tool_result",
+                    tool="test_codex_connectivity",
+                    content=report,
+                    ok=True,
+                )
+            ],
+        }
+    )
+
+    assert state["status"] == "done"
+    assert state.get("needs_human", False) is False
 
 
 def test_workflow_work_message_plan_is_bounded() -> None:
@@ -178,6 +259,25 @@ def test_executor_step_prompt_limits_context_to_one_plan_step() -> None:
     assert "Allowed tools:" in prompt
     assert "capture_work_message" in prompt
     assert "execute_shell_command" not in prompt
+
+
+def test_executor_prompt_requires_single_purpose_built_diagnostic_tool() -> None:
+    prompt = _executor_step_prompt(
+        {
+            "user_input": "检测codex连接",
+            "task_type": "code_task",
+            "route": "self",
+            "risk": "low",
+            "difficulty": "low",
+            "plan": [{"step": 1, "action": "execute", "description": "Run diagnostic."}],
+        },
+        {"step": 1, "action": "execute", "description": "Run diagnostic."},
+        step_index=0,
+    )
+
+    assert "purpose-built read-only diagnostic tool" in prompt
+    assert "run it once" in prompt
+    assert "do not substitute shell commands" in prompt
 
 
 def test_step_tool_names_are_action_scoped() -> None:
@@ -362,6 +462,26 @@ def test_verifier_accepts_bounded_work_message_result() -> None:
 
     assert state["status"] == "done"
     assert state["verifier_failures"] == 0
+
+
+def test_finalizer_uses_read_only_diagnostic_tool_report_without_recommendation() -> None:
+    finalizer = _finalizer_node(_FakeJsonModel('{"final_answer": "推荐使用 codex-proxy-cccx", "status": "done"}'))
+    report = "Available Codex configurations:\ncodex, codex-proxy-cccx"
+
+    state = finalizer(
+        {
+            "user_input": "检测codex连接",
+            "task_type": "code_task",
+            "route": "self",
+            "status": "done",
+            "final_answer": "executor summary",
+            "trace_events": [
+                TraceEvent(event_type="tool_result", tool="test_codex_connectivity", content=report, ok=True)
+            ],
+        }
+    )
+
+    assert state["final_answer"] == report
 
 
 def test_finalizer_replaces_failed_rag_answer_with_verification_failure() -> None:

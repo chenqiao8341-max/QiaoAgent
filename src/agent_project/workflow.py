@@ -28,6 +28,7 @@ WorkflowRisk = Literal["low", "medium", "high"]
 WorkflowDifficulty = Literal["low", "high"]
 RetryTarget = Literal["planner", "executor", "finalizer"]
 CODEX_COMMAND_PRIORITY = ("codex-proxy-anyrouter", "codex-proxy-cccx", "codex")
+READ_ONLY_DIAGNOSTIC_TOOL_NAMES = {"test_codex_connectivity"}
 
 
 class AgentState(TypedDict, total=False):
@@ -77,8 +78,9 @@ EXECUTOR_PROMPT = """You are the Executor node.
 Execute the plan using available tools. For work messages, capture and route the message first.
 For code/deployment/test-heavy tasks, create a work task and prepare Codex delegation when useful.
 For medium-risk repo work, call ensure_work_branch before edits, use an isolated branch, and do not merge it back to main automatically.
-Before starting Codex delegation, call test_codex_connectivity with command_names="codex-proxy-anyrouter,codex-proxy-cccx,codex".
-Choose the first usable Codex command in this exact priority order: codex-proxy-anyrouter, codex-proxy-cccx, codex.
+For read-only diagnostic/configuration requests, use the matching purpose-built tool once; do not substitute shell commands when a tool exists, and do not pass subset/filter arguments unless the user requested a subset.
+Only before starting Codex delegation, call test_codex_connectivity with command_names="codex-proxy-anyrouter,codex-proxy-cccx,codex".
+When delegating to Codex, choose the first usable Codex command in this exact priority order: codex-proxy-anyrouter, codex-proxy-cccx, codex.
 Pass that chosen command with codex_command when calling run_codex_task, start_codex_session, or continue_codex_session.
 Respect approval settings and stop if user confirmation is required."""
 
@@ -224,6 +226,14 @@ For rag_qa, local document questions, explicit citation requests, or work-record
             {"docs", "work_records", "project", "all", "none"},
             _fallback_retrieval_scope(user_input, task_type),
         )
+        if task_type == "work_message" and fallback_task_type != "work_message" and not _has_explicit_work_message_marker(user_input):
+            task_type = fallback_task_type
+            route = fallback_route
+            risk = fallback_risk
+            difficulty = fallback_difficulty
+            project_confidence = max(project_confidence, 0.8)
+            retrieval_needed = fallback_task_type in {"rag_qa", "work_message"}
+            retrieval_scope = _fallback_retrieval_scope(user_input, task_type)
         human_gate_reason = _router_human_gate_reason(task_type, project_confidence)
         status: WorkflowStatus = "need_user" if human_gate_reason else "running"
         report = _node_report(
@@ -333,7 +343,8 @@ Rules:
 - For "belongs to which project" or work-record matching, include search_work_record_vectors or capture_work_message in the plan description.
 - For rag_qa or retrieval_needed=true, include search_knowledge or answer_with_citations before final synthesis.
 - For citation answers, include verify_answer_citations after drafting the answer.
-- For route=codex, include create_work_task, rewrite_task_for_codex, test_codex_connectivity, and then delegation with the first usable command in priority order: codex-proxy-anyrouter, codex-proxy-cccx, codex.
+- For read-only diagnostic/configuration requests, plan one tool execution step using the matching purpose-built tool; do not plan shell commands when a tool exists.
+- For route=codex, include create_work_task, rewrite_task_for_codex, test_codex_connectivity with command_names="codex-proxy-anyrouter,codex-proxy-cccx,codex", and then delegation with the first usable command in priority order: codex-proxy-anyrouter, codex-proxy-cccx, codex.
 """,
             user_prompt=_planner_user_prompt(state, fallback_plan),
             fallback={"status": "need_user" if state.get("risk") == "high" else "running", "plan": fallback_plan},
@@ -344,6 +355,15 @@ Rules:
             {"running", "need_user"},
             "need_user" if state.get("risk") == "high" else "running",
         )
+        if _is_read_only_diagnostic_request(state.get("user_input", "")):
+            plan = build_plan(
+                user_input=state.get("user_input", ""),
+                task_type=state.get("task_type", "chat"),
+                route=state.get("route", "self"),
+                risk=state.get("risk", "low"),
+                difficulty=state.get("difficulty", "low"),
+            )
+            status = "running"
         if status == "need_user" and state.get("risk") != "high":
             status = "running"
         if state.get("risk") == "high":
@@ -621,6 +641,28 @@ def _verifier_node(model: Any):
                     ),
                 ),
             }
+        diagnostic_check = _deterministic_read_only_diagnostic_verification(state)
+        if diagnostic_check is not None:
+            report = _node_report(
+                "verifier",
+                diagnostic_check["reason"],
+                status="done" if diagnostic_check["ok"] else "failed",
+                needs_human=False,
+                data={"ok": diagnostic_check["ok"]},
+            )
+            return {
+                **state,
+                "status": "done" if diagnostic_check["ok"] else "failed",
+                "node_reports": _append_node_report(state, report),
+                "trace_events": _append_event(
+                    state,
+                    TraceEvent(
+                        event_type="verifier",
+                        content=diagnostic_check["reason"],
+                        ok=diagnostic_check["ok"],
+                    ),
+                ),
+            }
         rag_check = _deterministic_rag_verification(state)
         if rag_check is not None and not rag_check["ok"]:
             verifier_failures = state.get("verifier_failures", 0) + 1
@@ -808,15 +850,16 @@ Use retry_target="finalizer" only when retrying would not help.
 
 def _finalizer_node(model: Any):
     def run(state: AgentState) -> AgentState:
+        diagnostic_answer = _read_only_diagnostic_answer(state)
         if state.get("status") == "need_user":
             fallback_answer = _confirmation_answer(state)
         elif state.get("status") == "failed":
-            fallback_answer = _rag_failure_answer(state) or state.get("final_answer") or (
+            fallback_answer = _rag_failure_answer(state) or diagnostic_answer or state.get("final_answer") or (
                 "Workflow failed before completing the task. "
                 f"error_type: {state.get('error_type', '') or 'unknown'}"
             )
         else:
-            fallback_answer = state.get("final_answer", "")
+            fallback_answer = diagnostic_answer or state.get("final_answer", "")
         payload = _invoke_json_node(
             model=model,
             system_prompt=FINALIZER_PROMPT
@@ -827,11 +870,14 @@ Return only JSON:
   "status": "done|failed|need_user"
 }
 Do not invent tool results. Preserve required human gate prompts when needs_human=true.
+For read-only diagnostic/configuration tests, report the tested items and statuses from the tool result; do not apply delegation priority unless the user asked which command to use for delegation.
 """,
             user_prompt=_finalizer_user_prompt(state, fallback_answer),
             fallback={"final_answer": fallback_answer, "status": state.get("status", "done")},
         )
         answer = str(payload.get("final_answer") or fallback_answer)
+        if diagnostic_answer:
+            answer = diagnostic_answer
         if state.get("status") == "failed" and _rag_failure_answer(state):
             answer = fallback_answer
         human_gate_id = state.get("human_gate_id", "")
@@ -880,6 +926,17 @@ def classify_task_type(user_input: str) -> TaskType:
         "worker",
         "代码",
         "branch",
+        "codex",
+        "cli",
+        "命令",
+        "工具",
+        "检测",
+        "连接",
+        "连通",
+        "可用",
+        "配置",
+        "connectivity",
+        "connection",
     ]
     file_markers = ["读取", "查看", "文件", "目录", "markdown", "readme", ".py", ".md"]
     research_markers = ["搜索", "调研", "最新", "论文", "网页", "报告", "综述"]
@@ -912,7 +969,9 @@ def classify_route_risk_difficulty(
     risk: WorkflowRisk = "low"
     if any(marker in lowered for marker in high_risk_markers):
         risk = "high"
-    elif task_type in {"code_task", "file_task"} or any(marker in lowered for marker in medium_risk_markers):
+    elif task_type == "file_task" or any(marker in lowered for marker in medium_risk_markers):
+        risk = "medium"
+    elif task_type == "code_task" and not _is_read_only_diagnostic_request(user_input):
         risk = "medium"
 
     difficulty: WorkflowDifficulty = (
@@ -956,7 +1015,7 @@ def build_plan(
         steps = [
             "Inspect the request and relevant local context.",
             "Create a structured work task and rewrite it for Codex delegation.",
-            _codex_connectivity_step(),
+            _codex_delegation_connectivity_step(),
             "Delegate to Codex with the first usable command from codex-proxy-anyrouter, codex-proxy-cccx, codex.",
             "Summarize status and verification needs.",
         ]
@@ -967,6 +1026,17 @@ def build_plan(
             "Extract grounded notes.",
             "Synthesize the answer with source context.",
         ]
+    elif task_type == "code_task":
+        if _is_read_only_diagnostic_request(user_input):
+            steps = [
+                "Run the matching read-only diagnostic tool once and summarize the concrete result.",
+            ]
+        else:
+            steps = [
+                "Identify the relevant local diagnostic, code, or delegation tool for the request.",
+                "Run the requested diagnostic/tool check or inspect local code as needed.",
+                "Summarize the concrete result and any failure reason.",
+            ]
     elif task_type in {"file_task", "rag_qa"}:
         steps = [
             "Identify relevant local files or indexed private knowledge records.",
@@ -1105,6 +1175,7 @@ def _executor_step_prompt(state: AgentState, step: dict[str, Any], step_index: i
             f"risk={state.get('risk')} difficulty={state.get('difficulty')}",
             f"Execution policy: max_tool_calls={policy.max_tool_calls} max_seconds={policy.max_seconds}",
             "Allowed tools: " + ", ".join(sorted(allowed_tools)),
+            _executor_tool_guidance(state),
             "",
             f"Current step {step_index + 1}/{max(len(plan), 1)}:",
             f"{step.get('step', step_index + 1)}. [{step.get('action', 'execute')}] {step.get('description', '')}",
@@ -1126,6 +1197,10 @@ def _step_tool_names(state: AgentState | dict[str, Any], step: dict[str, Any]) -
     description = str(step.get("description", "")).lower()
     policy = policy_for_task(task_type, route)
 
+    if _is_read_only_diagnostic_request(str(state.get("user_input", ""))):
+        return set(READ_ONLY_DIAGNOSTIC_TOOL_NAMES)
+    if "test_codex_connectivity" in description:
+        return {"test_codex_connectivity"}
     if task_type == "work_message":
         if action == "route_work" or "capture" in description or "classify" in description:
             return {"capture_work_message"}
@@ -1142,6 +1217,16 @@ def _step_tool_names(state: AgentState | dict[str, Any], step: dict[str, Any]) -
     if task_type == "chat":
         return set(policy.allowed_tools)
     return set(policy.allowed_tools)
+
+
+def _executor_tool_guidance(state: AgentState) -> str:
+    if _is_read_only_diagnostic_request(str(state.get("user_input", ""))):
+        return (
+            "Tool argument requirement: use one matching purpose-built read-only diagnostic tool, "
+            "run it once, and do not substitute shell commands when such a tool is available. "
+            "Leave optional subset/filter arguments empty unless the user explicitly requested a subset."
+        )
+    return "Tool argument requirement: follow the current step only."
 
 
 def _planner_user_prompt(state: AgentState, fallback_plan: list[dict[str, Any]]) -> str:
@@ -1238,6 +1323,33 @@ def _confirmation_answer(state: AgentState) -> str:
     )
 
 
+def _read_only_diagnostic_answer(state: AgentState) -> str:
+    if not _is_read_only_diagnostic_request(state.get("user_input", "")):
+        return ""
+    tool_results = [
+        event for event in state.get("trace_events", []) if getattr(event, "event_type", "") == "tool_result"
+    ]
+    if not tool_results:
+        return ""
+    content = str(getattr(tool_results[-1], "content", "")).strip()
+    return content
+
+
+def _deterministic_read_only_diagnostic_verification(state: AgentState) -> dict[str, Any] | None:
+    if not _is_read_only_diagnostic_request(state.get("user_input", "")):
+        return None
+    tool_results = [
+        event for event in state.get("trace_events", []) if getattr(event, "event_type", "") == "tool_result"
+    ]
+    if not tool_results:
+        return {"ok": False, "reason": "Read-only diagnostic did not call a tool."}
+    latest = tool_results[-1]
+    content = str(getattr(latest, "content", ""))
+    if "Shell command denied" in content or "terminal approval is required" in content:
+        return {"ok": False, "reason": "Read-only diagnostic tool was denied before producing a report."}
+    return {"ok": True, "reason": "Read-only diagnostic tool returned a report."}
+
+
 def _rag_failure_answer(state: AgentState) -> str:
     if state.get("task_type") != "rag_qa" and not state.get("retrieval_needed"):
         return ""
@@ -1305,17 +1417,17 @@ def _codex_command_names() -> str:
     return ",".join(CODEX_COMMAND_PRIORITY)
 
 
-def _codex_connectivity_step() -> str:
+def _codex_delegation_connectivity_step() -> str:
     return (
-        "Call test_codex_connectivity with "
-        f"command_names=\"{_codex_command_names()}\" before starting Codex."
+        "Before delegating to Codex, call test_codex_connectivity with "
+        f"command_names=\"{_codex_command_names()}\"."
     )
 
 
 def _codex_delegation_policy_text() -> str:
     return "\n".join(
         [
-            _codex_connectivity_step(),
+            _codex_delegation_connectivity_step(),
             "Read the connectivity result and choose the first usable command in this order: "
             + ", ".join(CODEX_COMMAND_PRIORITY)
             + ".",
@@ -1541,6 +1653,34 @@ def _node_report(
 
 def _append_node_report(state: AgentState, report: dict[str, Any]) -> list[dict[str, Any]]:
     return [*state.get("node_reports", []), report]
+
+
+def _has_explicit_work_message_marker(user_input: str) -> bool:
+    lowered = user_input.lower()
+    return any(marker in lowered for marker in ["飞书", "工作消息", "工作收件箱", "会议纪要"])
+
+
+def _is_read_only_diagnostic_request(user_input: str) -> bool:
+    lowered = user_input.lower()
+    diagnostic_markers = [
+        "检测",
+        "测试",
+        "检查",
+        "连接",
+        "连通",
+        "可用",
+        "配置",
+        "状态",
+        "check",
+        "test",
+        "connectivity",
+        "connection",
+        "status",
+    ]
+    write_markers = ["修改", "实现", "部署", "迁移", "写入", "覆盖", "commit", "分支"]
+    return any(marker in lowered for marker in diagnostic_markers) and not any(
+        marker in lowered for marker in write_markers
+    )
 
 
 def _router_human_gate_reason(task_type: TaskType, project_confidence: float) -> str:
