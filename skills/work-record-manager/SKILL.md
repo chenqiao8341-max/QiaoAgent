@@ -1,6 +1,6 @@
 ---
 name: work-record-manager
-description: Use when the user asks to manage Qiao's work record, organize work progress, update /home/qiao/work/aaa-work.md, insert a new work item with project paths, summarize progress across project folders, or improve Markdown structure for project management notes.
+description: Use when the user asks to manage Qiao's work record, organize work progress, update /home/qingao/work/aaa-work.md, insert a new work item with project paths, summarize progress across project folders, or improve Markdown structure for project management notes.
 ---
 
 # Work Record Manager
@@ -8,7 +8,7 @@ description: Use when the user asks to manage Qiao's work record, organize work 
 This skill helps maintain Qiao's personal work record:
 
 ```text
-/home/qiao/work/aaa-work.md
+/home/qingao/work/aaa-work.md
 ```
 
 Use this skill when the user says things like:
@@ -71,7 +71,7 @@ Routing meanings:
 
 When asked to organize or update the work record:
 
-1. Read `/home/qiao/work/aaa-work.md` first.
+1. Read `/home/qingao/work/aaa-work.md` first.
 2. Extract each work item and its project paths.
 3. For each path, inspect only high-signal files first:
    - `README.md`

@@ -5,6 +5,7 @@ import os
 from langchain_anthropic import ChatAnthropic
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
+from openai import DefaultAsyncHttpxClient, DefaultHttpxClient
 
 from agent_project.config import Settings
 
@@ -55,6 +56,16 @@ def build_chat_model(settings: Settings):
             temperature=settings.model_temperature,
             api_key=settings.local_vllm_api_key,
             base_url=settings.local_vllm_base_url,
+            # The local Qwen template otherwise emits its private chain of thought
+            # inside `content` before `</think>`. That text breaks JSON parsing and
+            # strict final-answer verification in the multi-node workflow.
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+            # A local model request must not inherit the machine-wide HTTP/SOCKS
+            # proxy configuration. Some OpenAI client versions eagerly construct
+            # every configured proxy transport even when NO_PROXY matches localhost.
+            http_client=DefaultHttpxClient(trust_env=False),
+            http_async_client=DefaultAsyncHttpxClient(trust_env=False),
+            http_socket_options=(),
         )
 
     if provider in {"openai-compatible", "dashscope", "bailian", "aliyun"}:

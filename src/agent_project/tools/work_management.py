@@ -31,7 +31,7 @@ def _now() -> str:
 
 
 def work_record_path() -> Path:
-    configured = os.getenv("AGENT_WORK_RECORD_PATH", "/home/qiao/work/aaa-work.md")
+    configured = os.getenv("AGENT_WORK_RECORD_PATH", "/home/qingao/work/aaa-work.md")
     return Path(configured).expanduser().resolve()
 
 

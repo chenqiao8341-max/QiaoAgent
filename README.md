@@ -13,13 +13,14 @@
 - 自动联网搜索，基于 DuckDuckGo HTML 搜索页
 - 轻量浏览器操作：打开网页、抽取正文、列出链接
 - SQLite 长期记忆、工作收件箱、工作任务和持久化任务队列，用于跨会话保存偏好、项目事实和任务状态
-- `/home/qiao/work/aaa-work.md` 工作记录向量检索，用 embedding 辅助判断消息归属哪个项目
+- `/home/qingao/work/aaa-work.md` 工作记录向量检索，用 embedding 辅助判断消息归属哪个项目
 - SQLite Agent trace 记录、offline eval 和 live eval，用于路由、工具选择、RAG 引用和任务成功率评测
 - 初步全自动化工作流：显式 LangGraph `StateGraph` 节点 `Router -> Planner -> Executor -> Verifier -> Reflector -> Finalizer`
 - SQLite goal 管理，用于把长任务拆成可迭代的自治工作流
 - 工具执行过程可见化：读取文件、检索网页、执行命令、更新任务时输出进度
 - 命令行交互
 - 简单可扩展的项目结构
+- 隔离的本地文件 CRUD Agent RL 环境，支持逐步动作、程序化奖励和 trajectory 导出
 
 ## 目录
 
@@ -50,7 +51,7 @@ agent_project/
 ## 安装
 
 ```bash
-cd /home/qiao/work/agent_project
+cd /home/qingao/work/QiaoAgent
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
@@ -80,7 +81,7 @@ agent-chat sessions        # 列出当前工作目录的 session
 如果要把 session 存到自定义目录，可以设置：
 
 ```env
-AGENT_SESSION_DIR=/home/qiao/.agent_project
+AGENT_SESSION_DIR=/home/qingao/work/QiaoAgent/.agent_state
 ```
 
 也可以单次运行示例：
@@ -94,7 +95,7 @@ python examples/run_once.py "帮我计算 12 * 7，再告诉我当前配置的 p
 在 `.env` 中设置：
 
 ```env
-MODEL_PROVIDER=openai
+MODEL_PROVIDER=local-vllm
 ```
 
 可选值：
@@ -117,11 +118,11 @@ OPENAI_COMPATIBLE_BASE_URL=https://api.deepseek.com/v1
 OPENAI_COMPATIBLE_MODEL=deepseek-chat
 ```
 
-接入本地 vLLM 服务时，先用 `/home/qiao/work/llm_deploy` 启动模型，例如：
+本机默认接入 GPU 4-7 上已启动的 Qwen3.8-27B vLLM 服务，可先检查：
 
 ```bash
-python3 /home/qiao/work/llm_deploy/llmctl.py start qwen-3.6-35b-a3b --sudo
-python3 /home/qiao/work/llm_deploy/llmctl.py health --base-url http://127.0.0.1:8000
+curl --noproxy '*' http://127.0.0.1:8000/health
+curl --noproxy '*' http://127.0.0.1:8000/v1/models
 ```
 
 然后在 `.env` 中设置：
@@ -129,11 +130,11 @@ python3 /home/qiao/work/llm_deploy/llmctl.py health --base-url http://127.0.0.1:
 ```env
 MODEL_PROVIDER=local-vllm
 LOCAL_VLLM_BASE_URL=http://127.0.0.1:8000/v1
-LOCAL_VLLM_MODEL=qwen-3.6-35b-a3b
+LOCAL_VLLM_MODEL=Qwen3.8-27B
 LOCAL_VLLM_API_KEY=local-vllm
 ```
 
-`LOCAL_VLLM_MODEL` 要和 `work/llm_deploy/model_registry.json` 里的 `served_model_name` 一致。`local-vllm` provider 会自动把 `127.0.0.1` / `localhost` 加入 `NO_PROXY`，避免本地请求被系统代理转发。
+`LOCAL_VLLM_MODEL` 要和 `/v1/models` 返回的模型 ID 一致。`local-vllm` provider 会自动把 `127.0.0.1` / `localhost` 加入 `NO_PROXY`，避免本地请求被系统代理转发。
 
 ## Shell、联网搜索、浏览器和任务队列
 
@@ -190,11 +191,11 @@ description: Use when the user asks to manage Qiao's work record.
 
 ```env
 AGENT_ENABLE_SKILLS=true
-AGENT_SKILLS_DIRS=/home/qiao/work/agent_project/skills:/home/qiao/.codex/skills
+AGENT_SKILLS_DIRS=/home/qingao/work/QiaoAgent/skills:/home/qingao/.codex/skills
 AGENT_SKILL_CATALOG_LIMIT=25
 ```
 
-内置示例 `skills/work-record-manager/SKILL.md` 会指导 agent 维护 `/home/qiao/work/aaa-work.md`。
+内置示例 `skills/work-record-manager/SKILL.md` 会指导 agent 维护 `/home/qingao/work/aaa-work.md`。
 
 ## 工作收件箱和任务路由
 
@@ -202,8 +203,8 @@ AGENT_SKILL_CATALOG_LIMIT=25
 
 可用工具：
 
-- `list_work_record_items`：读取并解析 `/home/qiao/work/aaa-work.md`。
-- `index_work_record_vectors`：把 `/home/qiao/work/aaa-work.md` 中的工作项写入 SQLite 向量索引。
+- `list_work_record_items`：读取并解析 `/home/qingao/work/aaa-work.md`。
+- `index_work_record_vectors`：把 `/home/qingao/work/aaa-work.md` 中的工作项写入 SQLite 向量索引。
 - `preload_work_record_embedding_model` / `agent-chat preload work-embeddings`：提前加载 embedding 模型，降低第一次工作消息检索的冷启动延迟。
 - `search_work_record_vectors`：用本地 embedding 模型按语义检索工作项。
 - `capture_work_message`：保存一条手动整理的工作/飞书消息，自动匹配已有工作，生成 `self` / `codex` / `ask_user` / `defer` 路由。
@@ -231,14 +232,14 @@ AGENT_SKILL_CATALOG_LIMIT=25
 向量检索默认使用：
 
 ```env
-AGENT_EMBEDDING_MODEL_PATH=/home/qiao/models/embedding/Qwen__Qwen3-Embedding-0.6B
+AGENT_EMBEDDING_MODEL_PATH=/home/qingao/models/embedding/Qwen__Qwen3-Embedding-0.6B
 AGENT_EMBEDDING_DEVICE=cpu
 ```
 
 首次使用前安装新依赖：
 
 ```bash
-cd /home/qiao/work/agent_project
+cd /home/qingao/work/QiaoAgent
 source .venv/bin/activate
 pip install -e .
 ```
@@ -250,6 +251,22 @@ HTTPS_PROXY=http://127.0.0.1:17897 HTTP_PROXY=http://127.0.0.1:17897 pip install
 ```
 
 ## Tracing 和 Evals
+
+### 本地文件 CRUD Agent RL 环境
+
+项目包含一个不触碰真实项目文件的独立 RL 环境。每个 episode 使用临时沙箱，底模通过 `list_dir`、`read_file`、`write_file`、`delete_path` 和 `finish` JSON 动作与环境逐步交互。
+
+```bash
+agent-file-rl \
+  --dataset evals/file_crud_rl_v1.jsonl \
+  --policy local-model \
+  --split validation \
+  --report .agent_state/rl/file-validation.json \
+  --trajectories .agent_state/rl/file-validation-trajectories.jsonl
+```
+
+任务格式、reward 和安全边界见 [`docs/agent_rl_file_environment.md`](docs/agent_rl_file_environment.md)。
+Qwen3.5-4B 的数据规模调研、DPO/GRPO 预算和 reference policy 方案见 [`docs/agent_rl_data_and_reference_plan.md`](docs/agent_rl_data_and_reference_plan.md)。
 
 `invoke_agent` 和交互式 `agent-chat` 会把每次调用的基础轨迹写入 SQLite，表包括 `agent_traces` 和 `agent_trace_events`。当前记录 user input、final answer、latency、success/error，以及每个事件的 `duration_ms`、`node`、`tool_call_id`、`raw_error`、`prompt_chars` 和 token usage payload。长工具结果仍建议在后续版本落盘保存 full payload path，trace 表里保留摘要和结构化参数。
 
@@ -349,7 +366,7 @@ agent-chat knowledge verify "get_tools 工具 注册" "回答文本 [citation_id
 飞书监视采用事件回调模式。启动 watcher：
 
 ```bash
-cd /home/qiao/work/agent_project
+cd /home/qingao/work/QiaoAgent
 .venv/bin/agent-feishu-watch --host 0.0.0.0 --port 8787
 ```
 
@@ -410,7 +427,7 @@ python scripts/show_codex_interactions.py --list-session-interactions --limit 10
 agent 使用 SQLite 保存长期记忆和任务队列。默认路径由 `.env` 控制：
 
 ```env
-AGENT_STATE_DB_PATH=/home/qiao/work/agent_project/.agent_state/agent.sqlite3
+AGENT_STATE_DB_PATH=/home/qingao/work/QiaoAgent/.agent_state/agent.sqlite3
 AGENT_MEMORY_CONTEXT_LIMIT=5
 ```
 
@@ -434,7 +451,7 @@ AGENT_MEMORY_CONTEXT_LIMIT=5
 ```text
 [agent] searching web: weyl algebra automorphism
 [agent] search result: Example Domain -> https://example.com/
-[agent] reading file: /home/qiao/work/agent_project/README.md
+[agent] reading file: /home/qingao/work/QiaoAgent/README.md
 [agent] file write complete: /path/to/file.py (1200 chars, +8/-2 lines)
 ```
 
@@ -473,7 +490,7 @@ def your_tool(input_text: str) -> str:
 默认通过 `.env` 控制文件工具边界：
 
 ```env
-AGENT_WORKSPACE_ROOT=/home/qiao/work/agent_project
+AGENT_WORKSPACE_ROOT=/home/qingao/work
 AGENT_ENABLE_HUMAN_APPROVAL=true
 ```
 
@@ -533,4 +550,4 @@ Allow this operation? Type yes to approve:
 
 这里没有图形弹窗；需要在运行 `agent-chat` 的终端里输入 `yes`。其他输入会拒绝。
 
-`AGENT_ENABLE_HUMAN_APPROVAL=false` 时，`AGENT_WORKSPACE_ROOT` 内的写文件和 shell 命令会自动执行；工作区外操作会直接拒绝，不会反复询问。建议个人自用时把 `AGENT_WORKSPACE_ROOT` 设置为 `/home/qiao/work`。
+`AGENT_ENABLE_HUMAN_APPROVAL=false` 时，`AGENT_WORKSPACE_ROOT` 内的写文件和 shell 命令会自动执行；工作区外操作会直接拒绝，不会反复询问。建议个人自用时把 `AGENT_WORKSPACE_ROOT` 设置为 `/home/qingao/work`。

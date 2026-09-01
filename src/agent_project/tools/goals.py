@@ -484,7 +484,7 @@ def create_self_improvement_codex_prompt(
     gap_analysis: str,
     prioritized_improvement: str,
     test_plan: str,
-    cwd: str = "/home/qiao/work/agent_project",
+    cwd: str = "/home/qingao/work/QiaoAgent",
 ) -> str:
     """Create a Codex prompt for one self-improvement iteration tied to a goal."""
     goal = _load_goal(goal_id)
@@ -558,7 +558,7 @@ def run_agent_goal_cycle(
     gap_analysis: str = "",
     prioritized_improvement: str = "",
     test_plan: str = "",
-    cwd: str = "/home/qiao/work/agent_project",
+    cwd: str = "/home/qingao/work/QiaoAgent",
     codex_command: str = "codex-proxy-1",
     start_codex: bool = False,
     max_sources_per_query: int = 2,

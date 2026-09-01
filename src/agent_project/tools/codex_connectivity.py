@@ -12,7 +12,6 @@ from langchain_core.tools import tool
 
 from agent_project.tools.progress import emit_progress
 
-
 DEFAULT_PROMPT = "你好"
 DEFAULT_TIMEOUT_SECONDS = 30
 DEFAULT_SANDBOX = "read-only"
@@ -60,7 +59,9 @@ def _find_git_worktree(path: Path) -> Path | None:
     candidates = [path, *path.parents]
     for candidate in candidates:
         git_marker = candidate / ".git"
-        if git_marker.exists():
+        # A stray empty `.git` directory is not a worktree. This matters on
+        # shared machines where a parent such as /tmp may contain such a marker.
+        if (git_marker.is_dir() and (git_marker / "HEAD").is_file()) or git_marker.is_file():
             return candidate
     return None
 

@@ -18,6 +18,7 @@ dependencies = [
     "python-dotenv>=1.0.1",
     "pydantic>=2.7.0",
     "sentence-transformers>=3.0.0",
+    "typing-extensions>=4.7.0",
 ]
 
 [project.optional-dependencies]
@@ -29,6 +30,9 @@ dev = [
 [project.scripts]
 agent-chat = "agent_project.cli:main"
 agent-feishu-watch = "agent_project.feishu_watch:main"
+agent-file-rl = "agent_project.agent_rl.filesystem.rollout:main"
+agent-file-rl-generate = "agent_project.agent_rl.filesystem.generate:main"
+agent-file-rl-dpo-generate = "agent_project.agent_rl.filesystem.dpo:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
