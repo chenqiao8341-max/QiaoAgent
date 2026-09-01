@@ -1,0 +1,16 @@
+# QiaoAgent GRPO environment (Python 3.12, CUDA 12.x).
+#
+# TRL is intentionally omitted: the currently available TRL 0.24 stack is
+# incompatible with Transformers 5.8 and vLLM 0.19, and it does not provide
+# the multi-turn external-environment rollout/masking contract QiaoAgent needs.
+torch==2.10.0
+transformers==5.8.0
+vllm==0.19.1
+peft==0.18.1
+accelerate==1.11.0
+datasets==4.0.0
+safetensors==0.7.0
+tokenizers==0.22.2
+numpy>=1.26,<3
+pydantic>=2.7,<3
+pytest>=8,<10
